@@ -1,0 +1,22 @@
+{
+  "type": "FeatureCollection",
+  "autotrail": {"meta": {"name": "Corktown sample", "hare": "example", "notes": "Rough hand-drawn sample to test loading. Not a real trail."}},
+  "features": [
+    {"type": "Feature", "properties": {"role": "true_path"},
+     "geometry": {"type": "LineString", "coordinates": [
+       [-83.0760, 42.3305], [-83.0735, 42.3309], [-83.0700, 42.3314], [-83.0675, 42.3318],
+       [-83.0665, 42.3300], [-83.0660, 42.3290], [-83.0700, 42.3280], [-83.0745, 42.3265]]}},
+    {"type": "Feature", "properties": {"role": "return_path"},
+     "geometry": {"type": "LineString", "coordinates": [[-83.0770, 42.3285]]}},
+    {"type": "Feature", "properties": {"role": "branch", "purpose": "FALSE", "label": "false off the first check"},
+     "geometry": {"type": "LineString", "coordinates": [[-83.0700, 42.3314], [-83.0705, 42.3330]]}},
+    {"type": "Feature", "properties": {"kind": "check"},
+     "geometry": {"type": "Point", "coordinates": [-83.0700, 42.3314]}},
+    {"type": "Feature", "properties": {"kind": "false"},
+     "geometry": {"type": "Point", "coordinates": [-83.0705, 42.3328]}},
+    {"type": "Feature", "properties": {"kind": "check"},
+     "geometry": {"type": "Point", "coordinates": [-83.0660, 42.3290]}},
+    {"type": "Feature", "properties": {"kind": "backcheck", "n": 3},
+     "geometry": {"type": "Point", "coordinates": [-83.0720, 42.3275]}}
+  ]
+}
