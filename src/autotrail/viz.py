@@ -22,6 +22,15 @@ MARK_STYLE = {
     MarkKind.REJOIN: ("#2ca02c", "RJ"),
     MarkKind.BEER: ("#bcbd22", "B"),
 }
+# Basemaps. OpenStreetMap's own tile servers refuse pages opened from a local
+# file (no HTTP Referer, against their tile usage policy), so the default is
+# Esri's street map, which needs no key. "osm" works only when the HTML is
+# served over http(s), e.g. ``python -m http.server``.
+BASEMAPS = {
+    "streets": ("Esri.WorldStreetMap", "Streets (Esri)"),
+    "satellite": ("Esri.WorldImagery", "Satellite (Esri)"),
+    "osm": ("OpenStreetMap", "OpenStreetMap"),
+}
 BRANCH_COLOUR = {"FALSE": "#555555", "BACKCHECK_LURE": "#9467bd", "TURKEY": "#2ca02c", "EAGLE": "#17becf"}
 
 
@@ -38,12 +47,23 @@ def _badge(text: str, colour: str) -> folium.DivIcon:
     )
 
 
-def trail_map(trail: Trail, graph: StreetGraph, *, show_virtual: bool = True) -> folium.Map:
+def _add_basemaps(m: folium.Map, default: str) -> None:
+    if default not in BASEMAPS:
+        raise ValueError(f"Unknown basemap {default!r}; choose from {', '.join(BASEMAPS)}")
+    # The default goes first so it shows on load; satellite is offered as a switch.
+    for key in [default] + [k for k in ("streets", "satellite") if k != default]:
+        tiles, name = BASEMAPS[key]
+        folium.TileLayer(tiles=tiles, name=name, max_zoom=19).add_to(m)
+
+
+def trail_map(trail: Trail, graph: StreetGraph, *, show_virtual: bool = True,
+              tiles: str = "streets") -> folium.Map:
     true_ll = _latlon(_path_coords(graph, trail.true_path))
     lats = [p[0] for p in true_ll]
     lons = [p[1] for p in true_ll]
     m = folium.Map(location=[sum(lats) / len(lats), sum(lons) / len(lons)], zoom_start=15,
-                   tiles="OpenStreetMap", control_scale=True)
+                   tiles=None, control_scale=True)
+    _add_basemaps(m, tiles)
 
     true_mi = trail.true_trail_m(graph) / METRES_PER_MILE
     route = folium.FeatureGroup(name=f"True trail ({true_mi:.2f} mi)")

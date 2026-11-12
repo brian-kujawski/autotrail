@@ -64,6 +64,7 @@ def show(
     gpx: Optional[Path] = typer.Option(None, "--gpx", help="Also export the route as GPX."),
     area: Optional[str] = AreaOpt,
     areas_file: Optional[Path] = AreasFileOpt,
+    tiles: str = typer.Option("streets", "--tiles", help="Basemap: streets, satellite, or osm (osm needs the map served over http)."),
     open_browser: bool = typer.Option(False, "--open", help="Open the map in a browser."),
     verbose: bool = typer.Option(False, "--verbose/--quiet"),
 ) -> None:
@@ -88,7 +89,7 @@ def show(
         typer.echo(f"Uses {virt} stitched gap edge(s); check them on the ground.")
 
     out = out or trail_file.with_suffix(".html")
-    save_trail_map(trail, g, out)
+    save_trail_map(trail, g, out, tiles=tiles)
     typer.echo(f"Map: {out}")
     if save:
         trail.save(save, g)

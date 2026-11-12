@@ -29,6 +29,11 @@ autotrail show examples/corktown_sample.geojson --open
 HTML map next to the file (`--out` to choose). Add `--save trail.geojson` to keep the snapped
 Autotrail version and `--gpx trail.gpx` to export it for a phone.
 
+The basemap defaults to Esri's street map, with satellite as a switch in the layer menu
+(`--tiles satellite` to start on it). OpenStreetMap's own tile servers refuse maps opened
+straight from a file, under their [tile usage policy](https://operations.osmfoundation.org/policies/tiles/),
+so `--tiles osm` only works if you serve the HTML over http (for example `python -m http.server`).
+
 The cached graph lives in `data/cache/<area>.graphml` (set `AUTOTRAIL_DATA` to move it).
 Use `autotrail download --force` to refresh it.
 

@@ -113,5 +113,7 @@ def test_map_and_gpx(g, tmp_path):
     out = save_trail_map(t, g, tmp_path / "map.html")
     html = out.read_text()
     assert "True trail" in html and "Beer Near" in html and "BC3" in html
+    # OSM's tile servers block pages opened from a file, so the default basemap isn't theirs.
+    assert "arcgisonline.com" in html and "tile.openstreetmap.org" not in html
     gpx = t.to_gpx(g)
     assert "<trk>" in gpx and "BACKCHECK" in gpx
