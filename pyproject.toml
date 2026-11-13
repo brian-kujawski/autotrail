@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "autotrail"
-version = "0.0.1"
+version = "0.1.0"
 description = "Suggest hash trails from OpenStreetMap data and simulate a pack of hounds running them."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -2,10 +2,11 @@
 
 Suggest hash trails from OpenStreetMap data and simulate a pack of hounds running them.
 
-This is **Phase 0, the skeleton**: download and cache a walking map, a `Trail` file format
-with GeoJSON round trip, and an HTML map view. Trail generation (`autotrail generate`),
-the pack simulator (`autotrail sim`) and placement questions (`autotrail ask`) come in later
-phases. See the design doc for the plan.
+This is **Phase 1, the MVP end to end**: download and cache a walking map, generate a
+one-click trail with blobs, arrows, checks, whichy-ways and falses (`autotrail generate`), run
+a simulated pack and hare on any trail and score it (`autotrail sim`), and watch the replay on
+a map. Backchecks, splits, walkers and placement questions (`autotrail ask`) are phase 2.
+See the design doc for the plan.
 
 ## Install
 
@@ -24,6 +25,37 @@ autotrail areas                 # list configured map areas
 autotrail download              # fetch + cache Detroit, Highland Park, Hamtramck (a few minutes the first time)
 autotrail show examples/corktown_sample.geojson --open
 ```
+
+### One-click trail
+
+```bash
+autotrail generate --start "42.3315,-83.0700" --open
+autotrail generate --start "42.3315,-83.0700" --end "42.3350,-83.0600" --miles 4 --seed 2 --out tuesday.geojson
+```
+
+Start (and the Beer Near, if you give one) snap to the nearest intersection. Without `--end`
+a Beer Near is picked about `--return-miles` (default 1) from Start, and a hared leg back is
+added. It tries about 60 loop-shaped routes that keep clear of themselves, puts marks on the
+best few several ways, simulates the pack and the hare on each and keeps the best. Takes about
+a minute on the Detroit map. `--seed` gives a different trail. It writes the trail GeoJSON plus
+an HTML map with the pack replay (press Play), and prints the score.
+
+`--hare-pace 10:15` (min/mile while marking) and `--head-start 15` (minutes) set the hare.
+
+### Simulate a trail
+
+```bash
+autotrail sim tuesday.geojson --open
+autotrail sim examples/corktown_generated.geojson --open                        # made by the generate example above
+autotrail sim examples/corktown_sample.geojson --runs 50 --runners 15 --fastest 7:00 --slowest 10:00
+```
+
+Runs the pack (default 12 runners, 7:30 to 9:30 min/mile) 20 times and prints a scorecard,
+each hound's finish time, distance run and extra over true trail, how close the pack got to the
+hare, and what each check did. A trail with no blobs or with unmarked turns (like a
+hand-drawn one) gets blobs and arrows filled in first.
+
+### Show a trail
 
 `show` loads a trail, checks it against the map, prints the true trail distance and writes an
 HTML map next to the file (`--out` to choose). Add `--save trail.geojson` to keep the snapped
@@ -49,6 +81,57 @@ Draw on [geojson.io](https://geojson.io) (or QGIS) and save the GeoJSON:
   (or `bc`, plus `n` for the count), `whichy-way`, `split`, `rejoin`, `beer`. Any other
   properties are kept as the mark's parameters.
 * Optional points with `role` = `start` or `beer_near` to pin the ends.
+
+## Hash rules
+
+Both the generator and the simulated hounds follow these (`autotrail.rules`):
+
+* **Trail never turns without a mark.** At a corner with no mark, trail goes straight on.
+  "Straight" means one way on within 20 degrees of the way you came in, with every other way at
+  least 20 degrees further off (a bend with only one way on counts too). Every other turn gets a
+  check, a whichy-way or an arrow.
+* **Trail never crosses or comes near itself**, the leg back to Start included: no point is
+  within 35 m of trail laid earlier. That also rules out doubling back and running back down
+  the other side of a street, where hounds could cut across or see the hare.
+* **Checks are at turns.** On a long straight a hare may put a fake check (trail goes straight).
+  Three marks past a check solve it ("On one", "On two", "On-On"). A whichy-way (two arrows)
+  needs one mark, and its wrong leg ends in an F.
+* **Falses are few and short**: none, one or two per trail, a couple of blocks off a check,
+  marked often enough to call On-On, then an F. The hare runs every false out and back.
+
+## How the simulated pack behaves
+
+Each hound has a pace and follows a few rules (`autotrail.sim`; numbers in
+`autotrail.pack.HoundProfile`):
+
+* **Running**: spots each blob with probability 0.9 (arrows and checks are never missed). It
+  can't see marks down side streets. After 200 m with no mark it goes back to the last one and
+  looks again.
+* **Corners**: with no mark, straight on. If the trail turned there anyway, the hound runs out,
+  finds nothing and comes back.
+* **Checks**: the first hound picks a direction, the next takes another, and so on until every
+  way is taken; later hounds wait for a call. Three marks out a hound calls On-On; everyone
+  waiting at the check, or within 150 m, runs to it. The check is then marked, so late hounds
+  go straight the right way. A false fools the hounds who call On-On down it until someone
+  reaches the F and scratches the mark.
+* **Done** at the Beer Near. The return leg isn't simulated yet.
+
+The **hare** starts 15 minutes early at 10:15/mile and runs the trail plus every false and
+wrong leg out and back. The replay shows the hare as a black dot ringed in yellow.
+
+## Score
+
+`autotrail.score` gives each term 0 to 1 and a weighted total out of 100:
+
+| term | weight | measures |
+| --- | --- | --- |
+| `distance_fit` | 1 | true trail vs target: full marks within 5%, zero at 25% off |
+| `cohesion` | 2 | finish spread, mean and worst front-to-back gap along the trail (each 0.5 at 3 min), less time the back hound has nobody within 150 m, less any hound that doesn't finish |
+| `check_effectiveness` | 1 | share of the front-to-back gap the checks close |
+| `hare_safety` | 2 | how close the front of the pack gets to the hare: full marks 2 min or more behind, zero if caught |
+
+"Extra distance" (distance run minus true trail) is reported per hound and for the front and
+back quarter of the pack.
 
 ## Areas
 
@@ -86,7 +169,11 @@ download), `show` rebuilds the trail from the saved geometry instead.
 | `autotrail.config` | areas and data folder |
 | `autotrail.graph` | download, cache, gap stitching, `StreetGraph` lookups |
 | `autotrail.trail` | `Trail`, `Mark`, `Branch`, `EdgeRef`, `EdgePos`; validation; GeoJSON and GPX; snapping drawn trails |
-| `autotrail.viz` | Folium map |
+| `autotrail.pack` | `HoundProfile`, pack presets |
+| `autotrail.sim` | `TrailModel` (a trail compiled for the sim), event-driven tier 1 pack sim, `CheckPolicy` and `CallModel` hooks |
+| `autotrail.score` | `ScoreTerm` plug-ins, `ScoreCard`, text report |
+| `autotrail.generate` | route search, mark placement, `generate` (the one click) |
+| `autotrail.viz` | Folium map and pack replay |
 | `autotrail.cli` | `autotrail` command |
 
 ## Tests
