@@ -33,6 +33,7 @@ import bisect
 import heapq
 import math
 import random
+import time
 from dataclasses import dataclass, field, replace
 from datetime import date
 
@@ -286,7 +287,8 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
                radius_m: float, keep_apart_m: float = 25.0, noise: float = 0.25,
                turn_cost_m: float = 8.0, timing: PackTiming | None = None, sight_cost: float = 0.0,
                straight_run_m: float = math.inf, straight_cost: float = 0.0, stats: dict | None = None,
-               waypoints: tuple[int, ...] = (4, 5, 6)):
+               waypoints: tuple[int, ...] = (4, 5, 6), reserved: list[tuple] = (),
+               trace: dict | None = None):
     """One trail Start -> end shaped as a loop through a few random waypoints.
 
     Waypoints sit at increasing angles measured from the direction of the Beer
@@ -296,10 +298,18 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
     stretch is an A* search that keeps clear of trail already laid and, given
     ``timing``, shies away from streets the pack could see the hare on.
 
+    ``reserved`` is the leg back to Start, planned first: trail keeps clear of
+    it (except right at Start and the Beer Near), so there's always a way back.
+    ``trace``, if given, is filled in with the waypoints, the path so far and,
+    on failure, why (for the GUI's step-through mode).
+
     Returns (edges, footprint) or None.
     """
+    tr = trace if trace is not None else {}
+    tr.update(waypoints=[], edges=[], reason=None)
     sx, sy = geo.node_xy(start)
     ex, ey = geo.node_xy(end)
+    reserved_nodes = {n for e in reserved for n in e[:2]} - {start, end}
     base = math.atan2(ey - sy, ex - sx) if end != start else rng.uniform(0, 2 * math.pi)
     side = rng.choice((-1.0, 1.0))
     n_wp = rng.choice(waypoints)
@@ -314,13 +324,19 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
         r = radius_m * (rng.uniform(0.85, 1.15) if i % 2 == outer else rng.uniform(0.35, 0.6))
         th = base + side * math.radians(ang)
         wp = net.nearest(sx + r * math.cos(th), sy + r * math.sin(th), geo)
-        if wp in (start, end) or wp in wps:
+        if wp in (start, end) or wp in wps or wp in reserved_nodes:
+            tr["reason"] = "two waypoints (or a waypoint and Start, the Beer Near or the way back) on one corner"
             return None
         wps.append(wp)
+        tr["waypoints"] = list(wps)
     fp = Footprint(geo, keep_apart_m)
+    if reserved:
+        fp.add_path(reserved, "return")
+        # Trail leaves Start and reaches the Beer Near right next to the way back.
+        fp.zones += [(sx, sy, 2 * keep_apart_m), (ex, ey, 2 * keep_apart_m)]
     sight = SightField(geo, timing) if (timing is not None and sight_cost) else None
     edges: list[tuple] = []
-    visited = {start}
+    visited = {start} | reserved_nodes
     walked = 0.0
     stops = wps + [end]
     for i, goal in enumerate(stops):
@@ -345,6 +361,8 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
                 break
             seg = None
         if seg is None:
+            tr["reason"] = (f"no clear way to waypoint {i + 1} of {len(wps)}" if i < len(wps)
+                            else "no clear way into the Beer Near")
             return None
         for e in seg:
             fp.add(e, "true", walked)
@@ -353,6 +371,7 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
             walked += net.g.edge_length(*e)
             visited.add(e[1])
         edges += seg
+        tr["edges"] = edges
     return edges, fp
 
 
@@ -731,8 +750,13 @@ class Generated:
 
 def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = None, *,
              pack: list[HoundProfile] | None = None, hare: HareProfile | None = None,
-             seed: int = 0, progress=None) -> Generated:
-    """Build a trail Start -> Beer Near -> back to Start and pick the best by simulation."""
+             seed: int = 0, progress=None, on_route=None) -> Generated:
+    """Build a trail Start -> Beer Near -> back to Start and pick the best by simulation.
+
+    ``on_route(info)`` is called after every route attempt with what was tried (Start, Beer
+    Near, waypoints, the path laid, the way back) and how it went; it may block (the GUI's
+    step-through mode waits there for a click).
+    """
     o = opts or GenerateOptions()
     pack = pack or default_pack()
     hare = hare or HareProfile()
@@ -767,51 +791,69 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
 
     routes = []
     stats: dict = {}
+
+    def way_back(e):
+        """The leg Beer Near -> Start, planned before the trail so there's always a clear way back."""
+        if e == start:
+            return []
+        fpr = Footprint(geo, o.keep_apart_m)
+        kw = dict(max_len=back * 2.0, rng=rng, noise=0.25)
+        # Shorter and simpler than the trail: only the long straights get nudged.
+        ret = net.clear_path(e, start, fpr, "return", 0.0, set(), **kw,
+                             straight_run_m=max(o.straight_run_m, RETURN_STRAIGHT_M), straight_cost=o.straight_cost)
+        return ret if ret is not None else net.clear_path(e, start, fpr, "return", 0.0, set(), **kw)
+
     # Loop size: a first guess (the route weaves in and out, so it's longer than the rim);
     # each route found steers it toward the target.
     radius = target / 5.5
     per_end = max(1, o.tries // len(ends))
+    n_try, total = 0, per_end * len(ends)
+    no_way_back = 0
     for e in ends:
         for _ in range(per_end):
-            got = loop_route(net, geo, start, e, target, rng, radius, o.keep_apart_m,
-                             turn_cost_m=o.turn_cost_m, timing=timing, sight_cost=o.sight_cost,
-                             straight_run_m=o.straight_run_m, straight_cost=o.straight_cost, stats=stats,
-                             waypoints=o.waypoints)
-            if not got:
-                continue
-            r, fp = got
-            length = path_len(g, r)
-            radius *= (target / length) ** 0.5  # steer the loop size toward the target
-            fit = DistanceFit(target).score(length, []).value
-            if fit <= 0:
-                continue
-            # Shortlist on shape too: a twisty route beats a rectangle of the same length.
-            twist = min(1.0, turns_per_mile(geo, r, _cum(g, r)) / o.target_turns_per_mile)
-            routes.append((fit * (0.5 + 0.5 * twist) + rng.random() * 1e-3, r, e, fp))
+            n_try += 1
+            t0 = time.time()
+            ret = way_back(e)
+            trace: dict = {"waypoints": [], "edges": [], "reason": None}
+            got = None
+            if ret is None:
+                no_way_back += 1
+                trace["reason"] = "no clear way back from the Beer Near to Start"
+            else:
+                got = loop_route(net, geo, start, e, target, rng, radius, o.keep_apart_m,
+                                 turn_cost_m=o.turn_cost_m, timing=timing, sight_cost=o.sight_cost,
+                                 straight_run_m=o.straight_run_m, straight_cost=o.straight_cost, stats=stats,
+                                 waypoints=o.waypoints, reserved=ret, trace=trace)
+            info = {"n": n_try, "of": total, "start": start, "end": e, "return": ret or [],
+                    "waypoints": trace["waypoints"], "edges": trace["edges"], "ok": False,
+                    "reason": trace["reason"], "seconds": time.time() - t0}
+            if got:
+                r, fp = got
+                length = path_len(g, r)
+                radius *= (target / length) ** 0.5  # steer the loop size toward the target
+                fit = DistanceFit(target).score(length, []).value
+                tpm = turns_per_mile(geo, r, _cum(g, r))
+                info.update(length_m=length, turns_per_mile=tpm, fit=fit)
+                if fit <= 0:
+                    info["reason"] = f"{length / METRES_PER_MILE:.2f} mi: too far off {o.miles:g} mi"
+                else:
+                    # Shortlist on shape too: a twisty route beats a rectangle of the same length.
+                    twist = min(1.0, tpm / o.target_turns_per_mile)
+                    sc = fit * (0.5 + 0.5 * twist)
+                    info.update(ok=True, score=sc)
+                    routes.append((sc + rng.random() * 1e-3, r, e, ret, fp))
+            if on_route is not None:
+                on_route(info)
     if not routes:
-        raise RuntimeError("No route found from Start that keeps clear of itself; try another Start, "
-                           "a shorter --miles, or another --end")
+        if no_way_back == n_try:
+            raise RuntimeError("No clear way back from the Beer Near to Start (within twice the walk); "
+                               "try another Beer Near")
+        raise RuntimeError("No route found from Start that keeps clear of itself and the way back; "
+                           "try another Start, a shorter --miles, or another --end")
     routes.sort(key=lambda t: -t[0])
 
     picked, seen = [], []
-    for sc, r, e, fp in routes:
-        if e != start:
-            fpr = fp.copy()
-            fpr.zones += [(*geo.node_xy(start), 2 * o.keep_apart_m), (*geo.node_xy(e), 2 * o.keep_apart_m)]
-            banned = {x[0] for x in r} - {start}
-            kw = dict(max_len=back * 2.0, came_from=r[-1][0], turn_cost_m=o.turn_cost_m)
-            # The leg back is shorter and simpler: only the long straights get nudged.
-            ret = net.clear_path(e, start, fpr, "return", 0.0, banned, **kw,
-                                 straight_run_m=max(o.straight_run_m, RETURN_STRAIGHT_M),
-                                 straight_cost=o.straight_cost, run0=_tail_run(g, geo, r))
-            if ret is None:  # the long-straight nudge is a preference, never the reason there's no way back
-                ret = net.clear_path(e, start, fpr, "return", 0.0, banned, **kw)
-            if ret is None:
-                continue
-            fp = fp.copy()
-            fp.add_path(ret, "return")
-        else:
-            ret = []
+    for sc, r, e, ret, fp in routes:
         sig = frozenset(_und(x) for x in r)
         if any(len(sig & s) > 0.6 * len(sig) for s in seen):
             continue
@@ -819,8 +861,6 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
         picked.append((sc, r, e, ret, fp))
         if len(picked) >= o.candidates:
             break
-    if not picked:
-        raise RuntimeError("Found routes, but none with a leg back to Start that keeps clear of the trail")
     say(f"Tried {len(routes)} routes; simulating marks on the best {len(picked)}")
     if stats.get("unnudged"):
         say(f"Note: {stats['unnudged']} stretch(es) found no route with the long-straight and hare-sight "

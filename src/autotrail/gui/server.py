@@ -11,7 +11,10 @@ Endpoints (all JSON unless noted):
 * ``GET  /api/snap?lat=&lon=``   nearest intersection to a click
 * ``GET  /api/check?start=lat,lon&end=lat,lon&miles=``  walk distance, problem if any
 * ``POST /api/generate``         start a run; body {start: [lat, lon], end: [lat, lon] | null, settings}
-* ``GET  /api/jobs/<id>``        progress log and, when done, the result
+* ``GET  /api/jobs/<id>``        progress log, the latest route attempt and, when done, the result
+* ``POST /api/jobs/<id>/next``   step mode: go on to the next route attempt
+* ``POST /api/jobs/<id>/run``    step mode off: run the rest without pausing
+* ``POST /api/jobs/<id>/stop``   stop the run after the current route attempt
 * ``GET  /api/runs``             earlier runs (newest first)
 * ``GET  /runs/<run>/<file>``    a run's trail.geojson, trail.gpx or replay.html
 """
@@ -71,8 +74,12 @@ def _settings_from(d: dict) -> RunSettings:
     return s
 
 
+class Stopped(Exception):
+    """The user stopped the run."""
+
+
 class Job:
-    def __init__(self, start, end, settings: RunSettings, folder: Path):
+    def __init__(self, start, end, settings: RunSettings, folder: Path, step: bool = False):
         self.id = uuid.uuid4().hex[:10]
         self.start, self.end, self.settings, self.folder = start, end, settings, folder
         self.state = "queued"
@@ -81,6 +88,13 @@ class Job:
         self.error: str | None = None
         self.started = time.time()
         self.finished: float | None = None
+        # Step-through mode: each route attempt is drawn, then the run waits for Next.
+        self.step = step
+        self.waiting = False
+        self.stop = False
+        self.advance = threading.Event()
+        self.route: dict | None = None   # the latest route attempt, ready to draw
+        self.tally = {"ok": 0, "failed": 0}
 
     def say(self, msg: str) -> None:
         self.log.append(f"{time.time() - self.started:5.1f}s  {msg}")
@@ -88,7 +102,17 @@ class Job:
     def view(self) -> dict:
         end = self.finished or time.time()
         return {"id": self.id, "state": self.state, "log": self.log, "result": self.result,
-                "error": self.error, "elapsed_s": round(end - self.started, 1)}
+                "error": self.error, "elapsed_s": round(end - self.started, 1), "step": self.step,
+                "waiting": self.waiting, "route": self.route, "tally": self.tally}
+
+    def control(self, action: str) -> None:
+        if action == "run":
+            self.step = False
+        elif action == "stop":
+            self.stop = True
+        elif action != "next":
+            raise ValueError(f"Unknown action {action!r}")
+        self.advance.set()
 
 
 class GuiApp:
@@ -132,7 +156,7 @@ class GuiApp:
             raise RuntimeError("A trail is already being generated. Wait for it to finish.")
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         job = Job([float(start[0]), float(start[1])], None if end is None else [float(end[0]), float(end[1])],
-                  settings, self.runs_dir / f"{stamp}-seed{settings.seed}")
+                  settings, self.runs_dir / f"{stamp}-seed{settings.seed}", step=bool(body.get("step")))
         self.jobs[job.id] = job
         threading.Thread(target=self._work, args=(job,), daemon=True).start()
         return job
@@ -145,7 +169,7 @@ class GuiApp:
             res = run(self.g, (job.start[1], job.start[0]),
                       None if job.end is None else (job.end[1], job.end[0]), job.settings,
                       out=f / "trail.geojson", map_out=f / "replay.html", gpx=f / "trail.gpx",
-                      tiles=self.tiles, progress=job.say)
+                      tiles=self.tiles, progress=job.say, on_route=lambda info: self._route(job, info))
             t = res.trail
             s_lon, s_lat = self.g.node_lonlat(t.start)
             e_lon, e_lat = self.g.node_lonlat(t.end)
@@ -169,6 +193,10 @@ class GuiApp:
                                         encoding="utf-8")
             job.say(f"Done: score {result['score']:.0f}/100")
             job.state = "done"
+        except Stopped:
+            job.say("Stopped")
+            job.error = "Stopped by you."
+            job.state = "failed"
         except Exception as e:  # report anything to the page rather than kill the thread silently
             log.warning("Run failed: %s", traceback.format_exc())
             job.error = str(e) or e.__class__.__name__
@@ -177,6 +205,45 @@ class GuiApp:
         finally:
             job.finished = time.time()
             self.busy.release()
+
+    def _route(self, job: Job, info: dict) -> None:
+        """One route attempt: make it drawable, log it, and in step mode wait for a click."""
+        g = self.g
+
+        def line(edges):
+            pts: list = []
+            for u, v, k in edges:
+                c = [[round(y, 6), round(x, 6)] for x, y in g.edge_line(u, v, k).coords]
+                pts += c[1:] if pts else c
+            return pts
+
+        def latlon(n):
+            lon, lat = g.node_lonlat(n)
+            return [lat, lon]
+
+        r = {"n": info["n"], "of": info["of"], "ok": info["ok"], "reason": info.get("reason"),
+             "seconds": round(info.get("seconds", 0.0), 1),
+             "trail": line(info["edges"]), "back": line(info["return"]),
+             "waypoints": [latlon(w) for w in info["waypoints"]],
+             "start": latlon(info["start"]), "end": latlon(info["end"])}
+        if "length_m" in info:
+            r.update(miles=round(info["length_m"] / METRES_PER_MILE, 2),
+                     turns_per_mile=round(info["turns_per_mile"], 1),
+                     score=round(info["score"], 3) if "score" in info else None)
+        job.route = r
+        job.tally["ok" if info["ok"] else "failed"] += 1
+        what = f"{r['miles']} mi, {r['turns_per_mile']} turns/mi" if info["ok"] else f"failed: {r['reason']}"
+        if job.step:
+            job.say(f"Route {r['n']}/{r['of']} ({r['seconds']}s): {what}")
+        if job.stop:
+            raise Stopped()
+        if job.step:
+            job.advance.clear()
+            job.waiting = True
+            job.advance.wait()
+            job.waiting = False
+            if job.stop:
+                raise Stopped()
 
     def list_runs(self) -> list[dict]:
         out = []
@@ -260,6 +327,16 @@ def make_handler(app: GuiApp):
 
         def do_POST(self):
             u = urlparse(self.path)
+            parts = [p for p in u.path.split("/") if p]
+            if len(parts) == 4 and parts[:2] == ["api", "jobs"]:
+                job = app.jobs.get(parts[2])
+                if job is None:
+                    return self._err("No such job", HTTPStatus.NOT_FOUND)
+                try:
+                    job.control(parts[3])
+                except ValueError as e:
+                    return self._err(str(e), HTTPStatus.NOT_FOUND)
+                return self._json(job.view())
             if u.path.rstrip("/") != "/api/generate":
                 return self._err("Not found", HTTPStatus.NOT_FOUND)
             try:
