@@ -16,12 +16,12 @@ are checks, at least ``min_check_gap_m`` apart. To keep hounds honest, some
 checks and whichy-ways have straight on as the answer: any stretch of
 ``dull_m`` with no check or whichy-way may get one at a crossing, and now and
 then a run of short blocks gets a whichy-way at every crossing (straight,
-straight, straight... then the turn). No ratio is targeted. A whichy-way or two
-may replace an arrow; its wrong leg ends in an F after one mark. Zero to two
+straight, straight... then the turn). No ratio is targeted. Most other turns
+get a whichy-way (two arrows on the ground, nothing down the wrong way, so it
+costs the hare nothing); ``arrow_share`` of them keep a plain arrow. Zero to two
 falses hang off checks: a couple of blocks of close, obvious marks, then an F.
 Blobs every ~50 m, with a short unmarked gap after each check. The hare runs
-the trail plus every false and wrong leg out and back, so those cost the hare
-time; the score checks the pack doesn't catch the hare.
+the trail plus every false out and back, so those cost the hare time; the score checks the pack doesn't catch the hare.
 
 Each candidate is simulated and the best total score wins. Hill-climbing the
 marks is phase 2.
@@ -68,8 +68,7 @@ class GenerateOptions:
     falses: tuple[int, int] = (0, 2)
     false_len_m: tuple[float, float] = (150.0, 300.0)
     false_mark_every_m: float = 25.0
-    whichy_ways: tuple[int, int] = (0, 1)
-    whichy_leg_m: tuple[float, float] = (50.0, 100.0)
+    arrow_share: float = 0.2          # share of turns without a check that keep a plain arrow (the rest: whichy-ways)
     exact_ends: bool = False          # Start/Beer Near were picked by hand: keep them unless a dead end
     # Route search: a turn costs the hare only the ~3 s it takes to bend down and mark it, about
     # 8 m at hare pace. Turns slow the pack far more than the hare, so they aren't avoided.
@@ -559,42 +558,26 @@ def place_marks(trail: Trail, g: StreetGraph, rng: random.Random,
     extra_blobs: list[float] = []
     by_i = {c.i: c for c in cs}
 
-    # Whichy-ways replace some arrows: two arrows, one wrong leg that ends in an F after one mark.
-    # Straight-on whichy-ways (and runs of them) were picked above; if one can't get a wrong leg
-    # it becomes a check.
+    # Whichy-ways: two arrows drawn on the ground, and nothing at all down the wrong way (a
+    # hound who takes it finds no mark and comes back, or hears the call). They cost the hare
+    # nothing extra, so most turns without a check get one; only ``arrow_share`` keep a plain arrow.
+    # Straight-on whichy-ways (and runs of them) were picked above.
     arrows = [i for i, k in kind.items() if k == "arrow"]
-    rng.shuffle(arrows)
-    want_w = rng.randint(*o.whichy_ways)
-    picked = sorted(i for i, k in kind.items() if k == "whichy_pick")
-    for i in picked + arrows:
-        if i in arrows and want_w <= 0:
-            break
+    for i in sorted(i for i, k in kind.items() if k == "whichy_pick") + arrows:
         c = by_i[i]
-        for nb in rng.sample(c.ways, len(c.ways)):
-            if nb == c.nxt:
-                continue
-            leg = _side_leg(g, geo, fp, c.node, nb, rng.uniform(*o.whichy_leg_m), "whichy")
-            if leg is None or leg[1] < 40.0:
-                continue
-            edges, f_at = leg
-            fp.add_path(edges, "whichy")
-            branches.append(Branch(BranchPurpose.FALSE, [EdgeRef(*e) for e in edges],
-                                   f"whichy-way wrong leg at {c.s / METRES_PER_MILE:.2f} mi"))
-            bc = _cum(g, edges)
-            marks.append(Mark(MarkKind.BLOB, _pos(edges, bc, min(20.0, f_at / 2))))
-            marks.append(Mark(MarkKind.FALSE, _pos(edges, bc, f_at)))
-            if i in arrows:
-                want_w -= 1
-            kind[i] = "whichy"
-            marks.append(Mark(MarkKind.WHICHY_WAY, EdgePos(node=c.node), {"ways": [c.nxt, nb]}
-                              | ({"fake": True} if not c.turn else {})))
-            # The true way shows its one confirming mark early too.
-            first = g.edge_length(*tp[i])
-            extra_blobs.append(c.s + min(20.0, first * 0.6))
-            gaps.append((c.s, c.s + min(20.0, first * 0.6)))
-            break
-        if kind[i] == "whichy_pick":
-            kind[i] = "check"  # no room for a wrong leg
+        others = [nb for nb in c.ways if nb != c.nxt]
+        if not others or (kind[i] == "arrow" and rng.random() < o.arrow_share):
+            if kind[i] == "whichy_pick":
+                kind[i] = "check"  # nowhere else to point
+            continue
+        nb = rng.choice(others)
+        kind[i] = "whichy"
+        marks.append(Mark(MarkKind.WHICHY_WAY, EdgePos(node=c.node), {"ways": [c.nxt, nb]}
+                          | ({"fake": True} if not c.turn else {})))
+        # The true way shows its one confirming mark early.
+        first = g.edge_length(*tp[i])
+        extra_blobs.append(c.s + min(20.0, first * 0.6))
+        gaps.append((c.s, c.s + min(20.0, first * 0.6)))
 
     # Checks: a short unmarked gap on the true way, maybe a false down another way.
     checks = sorted(i for i, k in kind.items() if k == "check")

@@ -133,8 +133,9 @@ Both the generator and the simulated hounds follow these (`autotrail.rules`):
   crossing, and now and then a run of short blocks gets a whichy-way at every crossing
   (straight, straight, straight... then the turn). No ratio is targeted; on test grids about a
   third of checks come out straight on.
-  Three marks past a check solve it ("On one", "On two", "On-On"). A whichy-way (two arrows)
-  needs one mark, and its wrong leg ends in an F.
+  Three marks past a check solve it ("On one", "On two", "On-On"). A whichy-way (two arrows on
+  the ground) needs one mark on the right way; the wrong way has no marks at all, so it costs
+  the hare nothing. Most turns without a check get a whichy-way; arrows are used sparingly.
 * **Falses are few and short**: none, one or two per trail, a couple of blocks off a check,
   marked often enough to call On-On, then an F. The hare runs every false out and back.
 * **The pack never sees the hare.** A hound sees about 250 m down the street it's on (both
@@ -164,8 +165,8 @@ Each hound has a pace and follows a few rules (`autotrail.sim`; numbers in
   reaches the F and scratches the mark.
 * **Done** at the Beer Near. The return leg isn't simulated yet.
 
-The **hare** starts 15 minutes early at 10:15/mile and runs the trail plus every false and
-wrong leg out and back. The replay shows the hare as a black dot ringed in yellow.
+The **hare** starts 15 minutes early at 10:15/mile and runs the trail plus every false out and
+back. The replay shows the hare as a black dot ringed in yellow.
 
 ## Score
 

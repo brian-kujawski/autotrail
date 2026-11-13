@@ -258,10 +258,11 @@ class TrailModel:
                 if frm == cn:
                     opts.append(Option("false", t.edges[0][1], t, min(side_f.get(t.tid, t.length), t.length)))
                     side_nbs.add(t.edges[0][1])
-            if kind == "check":
-                for nb in self.geo.ways_on(prev, cn):
-                    if nb != nxt and nb not in side_nbs:
-                        opts.append(Option("probe", nb))
+            # A check could go any way; a whichy-way only its two. Unmarked ways are probes.
+            ways = self.geo.ways_on(prev, cn) if kind == "check" else (params or {}).get("ways", [])
+            for nb in ways:
+                if nb != nxt and nb not in side_nbs and nb in self.g.G[cn]:
+                    opts.append(Option("probe", nb))
             c.options = opts
             self.checks.append(c)
         self.checks.sort(key=lambda c: c.s)
