@@ -89,11 +89,18 @@ Both the generator and the simulated hounds follow these (`autotrail.rules`):
 * **Trail never turns without a mark.** At a corner with no mark, trail goes straight on.
   "Straight" means one way on within 20 degrees of the way you came in, with every other way at
   least 20 degrees further off (a bend with only one way on counts too). Every other turn gets a
-  check, a whichy-way or an arrow.
+  check, a whichy-way or an arrow. A **jog** (two turns that cancel out within 20 m, like a
+  step onto a sidewalk or across an offset crossing) is just straight on and gets no marks.
 * **Trail never crosses or comes near itself**, the leg back to Start included: no point is
   within 35 m of trail laid earlier. That also rules out doubling back and running back down
   the other side of a street, where hounds could cut across or see the hare.
-* **Checks are at turns.** On a long straight a hare may put a fake check (trail goes straight).
+* **No long straightaways.** The route search charges extra for every metre of a straight past
+  a quarter mile: a dead straight mile just lets the front runners pull away.
+* **Keep hounds honest.** Most checks are at turns, but some checks and whichy-ways have
+  straight on as the answer: any quarter mile with no check or whichy-way may get one at a
+  crossing, and now and then a run of short blocks gets a whichy-way at every crossing
+  (straight, straight, straight... then the turn). No ratio is targeted; on test grids about a
+  third of checks come out straight on.
   Three marks past a check solve it ("On one", "On two", "On-On"). A whichy-way (two arrows)
   needs one mark, and its wrong leg ends in an F.
 * **Falses are few and short**: none, one or two per trail, a couple of blocks off a check,
@@ -138,6 +145,7 @@ wrong leg out and back. The replay shows the hare as a black dot ringed in yello
 | `cohesion` | 2 | finish spread, mean and worst front-to-back gap along the trail (each 0.5 at 3 min), less time the back hound has nobody within 150 m, less any hound that doesn't finish |
 | `check_effectiveness` | 1 | share of the front-to-back gap the checks close |
 | `hare_safety` | 2 | how close the front of the pack gets to the hare: full marks 2 min or more behind, zero if caught |
+| `variety` | 1 | any quarter mile with nothing for the pack to do (no check or whichy-way) is a negative: each 0.5 mi of such dull trail past the first quarter mile halves it |
 | `hare_hidden` | 3 | seconds the hare spends in a hound's sightline (weighted: full up to 50 m away, 0.3 at 250 m); 8 s halves it |
 
 "Extra distance" (distance run minus true trail) is reported per hound and for the front and

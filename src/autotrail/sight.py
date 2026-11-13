@@ -47,8 +47,8 @@ class SightLines:
         self.geo, self.g, self.sight_m = geo, geo.g, sight_m
         self._rays: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
 
-    def ray(self, node, nb) -> tuple[np.ndarray, np.ndarray]:
-        """(cum metres, [n, 2] x/y) from ``node`` out via ``nb`` and straight on."""
+    def ray(self, node, nb) -> tuple[np.ndarray, np.ndarray, tuple]:
+        """(cum metres, [n, 2] x/y, bounding box) from ``node`` out via ``nb`` and straight on."""
         key = (node, nb)
         hit = self._rays.get(key)
         if hit is not None:
@@ -68,7 +68,9 @@ class SightLines:
             if nxt is None or nxt in seen:
                 break
             prev, cur = cur, nxt
-        hit = self._rays[key] = (np.concatenate(cums), np.concatenate(pts))
+        cum, p = np.concatenate(cums), np.concatenate(pts)
+        lo, hi = p.min(axis=0) - STREET_HALF_M, p.max(axis=0) + STREET_HALF_M
+        hit = self._rays[key] = (cum, p, (float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1])))
         return hit
 
     def rays_from(self, u, v, offset: float, length: float) -> list[tuple]:
@@ -90,7 +92,9 @@ class SightLines:
         dx, dy = hound_xy
         if (hx - dx) ** 2 + (hy - dy) ** 2 > self.sight_m ** 2:
             return False
-        for cum, p in self.rays_from(u, v, offset, length):
+        for cum, p, (x0, y0, x1, y1) in self.rays_from(u, v, offset, length):
+            if not (x0 <= hx <= x1 and y0 <= hy <= y1):
+                continue
             a_hare, off = _project(cum, p, hx, hy)
             if off > STREET_HALF_M:
                 continue
@@ -139,7 +143,7 @@ class Sighting:
     hound: str           # who saw it first
 
 
-def hare_sightings(result, pace_s_per_m: float, head_start_s: float, dt: float = 2.0,
+def hare_sightings(result, pace_s_per_m: float, head_start_s: float, dt: float = 3.0,
                    sight: SightLines | None = None, cap_s: float = 120.0) -> list[Sighting]:
     """Every stretch of time some hound had the hare in view during one sim run.
 
@@ -291,7 +295,7 @@ class SightField:
         for nb in self.geo.g.G.successors(n):
             if nb == n:
                 continue
-            cum, p = self.lines.ray(n, nb)
+            cum, p, _ = self.lines.ray(n, nb)
             for x, y in _resample(cum, p, self.sight_m, self.step):
                 self.cells.setdefault(self._cell(x, y), []).append((float(x), float(y), pos))
 
@@ -346,11 +350,12 @@ def check_looks_at_hare(geo: Geometry, lines: SightLines, timing: PackTiming, no
     if not sel.any():
         return False
     pts = true_xy[sel]
+    reach = probe_m + SIGHT_M
     for nb in ways:
-        cum, p = lines.ray(node, nb)
-        reach = probe_m + SIGHT_M
-        for x, y in pts:
+        cum, p, (x0, y0, x1, y1) = lines.ray(node, nb)
+        inside = (pts[:, 0] >= x0) & (pts[:, 0] <= x1) & (pts[:, 1] >= y0) & (pts[:, 1] <= y1)
+        for x, y in pts[inside]:
             a, off = _project(cum, p, float(x), float(y))
-            if off <= STREET_HALF_M and a <= reach and 0 < a:
+            if off <= STREET_HALF_M and 0 < a <= reach:
                 return True
     return False

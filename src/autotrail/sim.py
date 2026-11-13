@@ -45,7 +45,7 @@ import numpy as np
 
 from .graph import StreetGraph
 from .pack import HoundProfile, default_pack
-from .rules import COVER_M, Geometry
+from .rules import COVER_M, Geometry, jog_corners
 from .trail import BranchPurpose, MarkKind, Trail
 
 MAX_SIM_S = 4 * 3600.0
@@ -280,7 +280,10 @@ class TrailModel:
         self.unmarked_turns: list[float] = []
         self.arrow_nodes: list = []
         last_mark = -math.inf
+        jogs = jog_corners(self.geo, tp, cum)
         for s, node, i in nodes_along:
+            if i in jogs and s not in arrow_s and s not in self.check_at:
+                continue  # a jog is straight on
             if s in self.check_at:
                 last_mark = s
                 continue

@@ -236,9 +236,42 @@ class HareHidden:
         return TermScore(self.name, v, self.weight, d)
 
 
+def dull_stretches(model, dull_m: float) -> list[tuple[float, float]]:
+    """(from, to) metres along the true trail: stretches over ``dull_m`` with no check or whichy-way."""
+    ev = [0.0] + sorted(c.s for c in model.checks) + [model.L]
+    return [(a, b) for a, b in zip(ev, ev[1:]) if b - a > dull_m]
+
+
+@dataclass
+class Variety:
+    """Any quarter mile with nothing for the pack to do (no check or whichy-way) is a negative.
+
+    Soft: ``half_m`` metres of dull trail past the first quarter mile of each
+    stretch halves it, so a trail whose best features need a long straight
+    can still win.
+    """
+    weight: float = 1.0
+    dull_m: float = 402.0
+    half_m: float = 800.0
+    name: str = "variety"
+
+    def score(self, true_trail_m, results):
+        if not results or results[0].model is None:
+            return TermScore(self.name, 1.0, self.weight, {})
+        m = results[0].model
+        dull = dull_stretches(m, self.dull_m)
+        excess = sum(b - a - self.dull_m for a, b in dull)
+        straight = sum(c.fake for c in m.checks)
+        d = {"dull_stretches": len(dull), "dull_excess_mi": excess / METRES_PER_MILE,
+             "longest_mi": max((b - a for a, b in dull), default=0.0) / METRES_PER_MILE,
+             "straight_on_checks": f"{straight}/{len(m.checks)}"}
+        return TermScore(self.name, _half_at(excess, self.half_m), self.weight, d)
+
+
 def default_terms(target_m: float | None, hare: HareProfile | None = None) -> list:
     hare = hare or HareProfile()
-    return [DistanceFit(target_m), Cohesion(), CheckEffectiveness(), HareSafety(hare), HareHidden(hare)]
+    return [DistanceFit(target_m), Cohesion(), CheckEffectiveness(), HareSafety(hare), HareHidden(hare),
+            Variety()]
 
 
 def summarize(results: list[SimResult]) -> dict:
