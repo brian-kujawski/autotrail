@@ -84,6 +84,11 @@ class GenerateOptions:
 
 RUN_STEP_M = 25.0  # route search tracks the straight run so far in steps of this
 RETURN_STRAIGHT_M = 400.0  # the leg back to Start is nudged off straights longer than this
+MAX_LEN_SHARE = 1.25       # a trail may be at most this times the target (distance fit is 0 there)
+WALK_DETOUR = 1.5          # a waypoint's walk from Start may be this many times the crow-flies distance...
+WALK_SLACK_M = 200.0       # ...plus this (a grid is up to 1.41x; more means a river or freeway in the way)
+WAYPOINT_DRAWS = 6         # tries at each waypoint before giving up the attempt
+WAYPOINT_SNAP = 0.35       # a waypoint may sit this share of its radius from the point drawn
 
 
 # ---------------------------------------------------------------- local network
@@ -248,14 +253,59 @@ class Network:
         nodes = [a] + [e[1] for e in out]
         return out if len(set(nodes)) == len(nodes) else None
 
-    def nearest(self, x: float, y: float, geo: Geometry, min_ways: int = 3):
-        """The network corner nearest a point in local metres (with at least ``min_ways`` streets)."""
+    def nearest(self, x: float, y: float, geo: Geometry, min_ways: int = 3, walkable: bool = False):
+        """The network corner nearest a point in local metres (with at least ``min_ways`` streets).
+
+        With ``walkable``, only corners :meth:`set_walks` found a sensible walk from Start.
+        """
         if not hasattr(self, "_xy"):
             ids = [n for n in self.nodes if len(self.adj[n]) >= min_ways]
             self._ids = ids
             self._xy = np.array([geo.node_xy(n) for n in ids])
         d2 = (self._xy[:, 0] - x) ** 2 + (self._xy[:, 1] - y) ** 2
+        if walkable and getattr(self, "_ok", None) is not None:
+            if not self._ok.any():
+                return None
+            d2 = np.where(self._ok, d2, np.inf)
         return self._ids[int(np.argmin(d2))]
+
+    def set_walks(self, start, geo: Geometry, detour: float = WALK_DETOUR, slack_m: float = WALK_SLACK_M):
+        """Walking distance from Start to every corner, and which corners make sensible waypoints:
+        reachable, and not much further on foot than as the crow flies (so not across a river,
+        a freeway or a rail yard with the nearest crossing far away)."""
+        self.walk = self.dijkstra(start)
+        self.nearest(0.0, 0.0, geo)  # build the corner index
+        sx, sy = geo.node_xy(start)
+        crow = np.hypot(self._xy[:, 0] - sx, self._xy[:, 1] - sy)
+        walk = np.array([self.walk.get(n, np.inf) for n in self._ids])
+        self._ok = walk <= detour * crow + slack_m
+
+    def shortest_m(self, a, b, geo: Geometry, cutoff: float = math.inf) -> float:
+        """Plain shortest walk a -> b in metres (no trail to keep clear of); inf past ``cutoff``."""
+        if a == b:
+            return 0.0
+        bx, by = geo.node_xy(b)
+
+        def h(n):
+            x, y = geo.node_xy(n)
+            return math.hypot(x - bx, y - by)
+
+        dist = {a: 0.0}
+        pq = [(h(a), 0.0, a)]
+        while pq:
+            f, d, u = heapq.heappop(pq)
+            if u == b:
+                return d
+            if f > cutoff:
+                return math.inf
+            if d > dist[u]:
+                continue
+            for v, _, l, _ in self.adj.get(u, ()):
+                nd = d + l
+                if nd < dist.get(v, math.inf):
+                    dist[v] = nd
+                    heapq.heappush(pq, (nd + h(v), nd, v))
+        return math.inf
 
 
 # ---------------------------------------------------------------- stage 1: routes
@@ -317,18 +367,50 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
     # and points alternately far out and close in: the route weaves in and out instead of
     # tracing the rim of the loop, so it has distance to spare for twists.
     slot = 280.0 / n_wp
-    angles = [40 + (i + 0.5) * slot + rng.uniform(-0.25, 0.25) * slot for i in range(n_wp)]
     outer = rng.randrange(2)
+    walkable = getattr(net, "_ok", None) is not None
     wps = []
-    for i, ang in enumerate(angles):
-        r = radius_m * (rng.uniform(0.85, 1.15) if i % 2 == outer else rng.uniform(0.35, 0.6))
-        th = base + side * math.radians(ang)
-        wp = net.nearest(sx + r * math.cos(th), sy + r * math.sin(th), geo)
-        if wp in (start, end) or wp in wps or wp in reserved_nodes:
+    for i in range(n_wp):
+        wp = None
+        for _ in range(WAYPOINT_DRAWS if walkable else 1):
+            ang = 40 + (i + 0.5) * slot + rng.uniform(-0.3, 0.3) * slot
+            r = radius_m * (rng.uniform(0.85, 1.15) if i % 2 == outer else rng.uniform(0.35, 0.6))
+            th = base + side * math.radians(ang)
+            px, py = sx + r * math.cos(th), sy + r * math.sin(th)
+            c = net.nearest(px, py, geo, walkable=walkable)
+            if c is None or c in (start, end) or c in wps or c in reserved_nodes:
+                continue
+            cx, cy = geo.node_xy(c)
+            if walkable and math.hypot(cx - px, cy - py) > WAYPOINT_SNAP * r:
+                continue  # nothing walkable near the point drawn (water, a park, a freeway): draw again
+            wp = c
+            break
+        if wp is None:
+            if walkable:
+                continue  # nothing walkable that way (water, a freeway): the loop skips this direction
             tr["reason"] = "two waypoints (or a waypoint and Start, the Beer Near or the way back) on one corner"
             return None
         wps.append(wp)
+    if len(wps) < 2:
+        tr["reason"] = "fewer than 2 sensible waypoints (water or barriers most ways from Start?)"
         tr["waypoints"] = list(wps)
+        return None
+    tr["waypoints"] = list(wps)
+    if walkable:
+        # The plain shortest walk through every waypoint is the least this trail can be. Too long
+        # already: give up now, before the slow search that also has to keep clear of the trail.
+        budget = target_m * MAX_LEN_SHARE
+        least, here = net.walk.get(wps[0], math.inf), wps[0]
+        for goal in wps[1:] + [end]:
+            if least > budget:
+                break
+            least += net.shortest_m(here, goal, geo, cutoff=budget - least)
+            here = goal
+        tr["least_m"] = least
+        if least > budget:
+            tr["reason"] = ("waypoints too far apart on foot: the shortest walk through them is "
+                            + (f"{least / 1609.344:.1f} mi" if least < math.inf else f"over {budget / 1609.344:.1f} mi"))
+            return None
     fp = Footprint(geo, keep_apart_m)
     if reserved:
         fp.add_path(reserved, "return")
@@ -340,7 +422,7 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
     walked = 0.0
     stops = wps + [end]
     for i, goal in enumerate(stops):
-        left = target_m * 1.25 - walked
+        left = target_m * MAX_LEN_SHARE - walked
         kw = dict(max_len=left, rng=rng, noise=noise, came_from=edges[-1][0] if edges else None,
                   turn_cost_m=turn_cost_m, run0=_tail_run(net.g, geo, edges))
         here = edges[-1][1] if edges else start
@@ -791,6 +873,7 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
 
     routes = []
     stats: dict = {}
+    net.set_walks(start, geo)
 
     def way_back(e):
         """The leg Beer Near -> Start, planned before the trail so there's always a clear way back."""
