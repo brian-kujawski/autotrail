@@ -81,3 +81,14 @@ def test_cache_round_trip(tmp_path, monkeypatch):
     assert isinstance(d["length_m"], float)
     assert isinstance(g2.G.nodes[u]["degree"], int)
     assert g2.summary()["nodes"] == g1.summary()["nodes"]
+
+
+def test_make_two_way_adds_missing_reverses(grid):
+    from autotrail.graph import make_two_way
+
+    a, b = grid_id(0, 0), grid_id(1, 0)
+    grid.remove_edge(b, a, 0)  # a car one-way
+    assert make_two_way(grid) == 1
+    assert grid.has_edge(b, a) and grid.edges[b, a, 0]["length"] == grid.edges[a, b, 0]["length"]
+    assert make_two_way(grid) == 0
+    assert all(grid.has_edge(v, u) for u, v in grid.edges())

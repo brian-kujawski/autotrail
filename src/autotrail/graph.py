@@ -63,14 +63,16 @@ HASH_WALK_FILTER = (
     '["foot"!~"no"]["service"!~"private"]'
     '["sidewalk"!~"separate"]["sidewalk:both"!~"separate"]["sidewalk:left"!~"separate"]["sidewalk:right"!~"separate"]'
 )
-GRAPH_FORMAT = 2  # bump when the download filter changes, so old caches get flagged
+GRAPH_FORMAT = 3  # 2: cycleways included; 3: every street two-way
 
 
 def download_graph(area: Area) -> nx.MultiDiGraph:
     """Download the walk network (plus cycleways) for the union of the area's places."""
     log.info("Downloading %s network for %s", area.network_type, ", ".join(area.places))
     if area.network_type == "walk":
-        return ox.graph_from_place(list(area.places), custom_filter=HASH_WALK_FILTER,
+        # network_type="walk" still matters with a custom filter: it is what tells OSMnx to
+        # make every street two-way (one-way signs are for cars, not hounds).
+        return ox.graph_from_place(list(area.places), network_type="walk", custom_filter=HASH_WALK_FILTER,
                                    simplify=True, retain_all=False)
     return ox.graph_from_place(
         list(area.places), network_type=area.network_type, simplify=True, retain_all=False
@@ -94,14 +96,19 @@ def load_area_graph(
     if path.exists() and not force:
         G = ox.load_graphml(path, node_dtypes=_NODE_DTYPES, edge_dtypes=_EDGE_DTYPES)
         log.info("Loaded cached graph %s", path)
-        if int(G.graph.get("autotrail_format", 1)) < GRAPH_FORMAT:
+        if int(G.graph.get("autotrail_format", 1)) < 2:
             log.warning("The cached map %s predates bike paths being included. Run "
                         "'autotrail download --force' to refresh it.", path)
+        fixed = make_two_way(G)
+        if fixed:
+            log.warning("The cached map had %d one-way street(s); made them two-way in memory. "
+                        "'autotrail download --force' fixes the file.", fixed)
         return StreetGraph(G, area_key=area.key)
 
     configure_osmnx(root)
     G = download_graph(area)
     annotate(G)
+    make_two_way(G)
     added = stitch_gaps(G, area.stitch_tolerance_m) if stitch else []
     log.info("Stitched %d gaps", len(added))
     G.graph["autotrail_area"] = area.key
@@ -110,6 +117,28 @@ def load_area_graph(
     path.parent.mkdir(parents=True, exist_ok=True)
     ox.save_graphml(G, path)
     return StreetGraph(G, area_key=area.key)
+
+
+def make_two_way(G: nx.MultiDiGraph) -> int:
+    """Give every edge a reverse twin, so every street can be run both ways. Returns how many were added.
+
+    Hounds ignore one-way signs. OSMnx only builds both directions for its preset walk network,
+    and a map downloaded with a custom filter alone came out with car one-ways, which broke
+    anything that looks back along a street (KeyError in the hare sightlines).
+    """
+    missing = [(u, v, k, d) for u, v, k, d in G.edges(keys=True, data=True)
+               if u != v and not _reverse_twins(G, u, v, d["length"])]
+    for u, v, k, d in missing:
+        r = dict(d)
+        geom = d.get("geometry")
+        if geom is not None:
+            r["geometry"] = LineString(list(geom.coords)[::-1])
+        r["reversed"] = not bool(d.get("reversed", False))
+        r["oneway"] = False
+        G.add_edge(v, u, **r)
+    if missing:
+        _refresh_degrees(G, {n for u, v, _, _ in missing for n in (u, v)})
+    return len(missing)
 
 
 def annotate(G: nx.MultiDiGraph) -> None:
