@@ -90,6 +90,10 @@ The basemap defaults to Esri's street map, with satellite as a switch in the lay
 straight from a file, under their [tile usage policy](https://operations.osmfoundation.org/policies/tiles/),
 so `--tiles osm` only works if you serve the HTML over http (for example `python -m http.server`).
 
+The download is OSMnx's walking network plus cycleways (OSM often tags a shared path through a
+park as a cycleway, and hashes run on bike paths; ways marked `foot=no` are still left out). A map
+cached before this change prints a warning: run `autotrail download --force` to refresh it.
+
 The cached graph lives in `data/cache/<area>.graphml` (set `AUTOTRAIL_DATA` to move it).
 Use `autotrail download --force` to refresh it.
 
