@@ -185,6 +185,19 @@ def jog_corners(geo: Geometry, edges: list[tuple], cum) -> set[int]:
     return out
 
 
+def straight_runs(geo: Geometry, edges: list[tuple], cum) -> list[tuple[float, float]]:
+    """(from, to) metres of each straightaway: corners where the way on is within ``STRAIGHT_DEG``
+    of the way in don't break it, whatever the marks say."""
+    out, a = [], 0.0
+    for i in range(1, len(edges)):
+        if geo.deviation(edges[i - 1][0], edges[i][0], edges[i][1]) > STRAIGHT_DEG:
+            out.append((a, float(cum[i])))
+            a = float(cum[i])
+    if edges:
+        out.append((a, float(cum[len(edges)])))
+    return out
+
+
 def turn_angle(geo: Geometry, prev, node, nxt) -> float:
     """Absolute turn in radians going prev -> node -> nxt (0 = straight on)."""
     return math.radians(geo.deviation(prev, node, nxt))
