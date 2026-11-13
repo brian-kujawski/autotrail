@@ -74,3 +74,42 @@ def grid() -> nx.MultiDiGraph:
     G = build_grid()
     annotate(G)
     return G
+
+
+def build_city(n: int = 16, step: float = 110.0, seed: int = 1) -> nx.MultiDiGraph:
+    """A bigger, slightly irregular grid (n x n, ~step m blocks, a few streets missing)."""
+    import random
+
+    rnd = random.Random(seed)
+    G = nx.MultiDiGraph(crs="epsg:4326")
+    pos = {}
+    for r in range(n):
+        for c in range(n):
+            pos[r * n + c + 1] = (c * step + rnd.uniform(-8, 8), r * step + rnd.uniform(-8, 8))
+    for k, (x, y) in pos.items():
+        lon, lat = ll(x, y)
+        G.add_node(k, x=lon, y=lat, street_count=0)
+
+    def link(a, b):
+        (xa, ya), (xb, yb) = pos[a], pos[b]
+        length = math.hypot(xa - xb, ya - yb)
+        for u, v in ((a, b), (b, a)):
+            G.add_edge(u, v, length=length, highway="residential", oneway=False, reversed=u != a, osmid=a)
+
+    for r in range(n):
+        for c in range(n):
+            i = r * n + c + 1
+            if c < n - 1 and rnd.random() > 0.08:
+                link(i, i + 1)
+            if r < n - 1 and rnd.random() > 0.08:
+                link(i, i + n)
+    G = G.subgraph(max(nx.weakly_connected_components(G), key=len)).copy()
+    return G
+
+
+@pytest.fixture(scope="module")
+def city():
+    from autotrail.graph import StreetGraph, annotate
+    G = build_city()
+    annotate(G)
+    return StreetGraph(G, area_key="city")
