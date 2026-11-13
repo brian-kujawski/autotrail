@@ -37,6 +37,7 @@ from .graph import StreetGraph
 from .pack import HareProfile, HoundProfile, default_pack
 from .rules import COVER_M, Footprint, Geometry, is_sidewalk
 from .score import DistanceFit, ScoreCard, score_results
+from .sight import PackTiming, SightField, SightLines, check_looks_at_hare
 from .sim import SimResult, TrailModel, simulate_many
 from .trail import METRES_PER_MILE, Branch, BranchPurpose, EdgePos, EdgeRef, Mark, MarkKind, Trail
 
@@ -60,6 +61,8 @@ class GenerateOptions:
     false_mark_every_m: float = 25.0
     whichy_ways: tuple[int, int] = (0, 1)
     whichy_leg_m: tuple[float, float] = (50.0, 100.0)
+    sight_cost: float = 3.0           # each metre the pack could see the hare run costs this many extra
+    risky_check_share: float = 0.2    # chance a turn gets a check when checkers would look at the hare
 
 
 # ---------------------------------------------------------------- local network
@@ -123,14 +126,17 @@ class Network:
 
     def clear_path(self, a, b, fp: Footprint, tag: str, pos0: float, banned: set, *,
                    max_len: float = math.inf, rng: random.Random | None = None, noise: float = 0.0,
-                   came_from=None, turn_cost_m: float = 0.0, max_expand: int = 80000) -> list[tuple] | None:
+                   came_from=None, turn_cost_m: float = 0.0, max_expand: int = 80000,
+                   sight: SightField | None = None, sight_cost: float = 0.0) -> list[tuple] | None:
         """A* a -> b that avoids ``banned`` nodes and keeps clear of the footprint.
 
         The heuristic is straight-line distance. Leaving a corner any way but
         straight on costs ``turn_cost_m`` extra (each such turn needs a mark),
         so routes run along streets instead of staircasing. With ``noise`` > 0
         each street costs up to (1 + noise) times its length, drawn at random,
-        so repeated searches find different, still sensible, routes.
+        so repeated searches find different, still sensible, routes. With a
+        ``sight`` field, each metre the pack could see the hare run costs
+        ``sight_cost`` metres extra.
         """
         if a == b:
             return []
@@ -181,6 +187,10 @@ class Network:
                     continue
                 if fp.clashes((u, v, k), tag, pos0 + ru):
                     continue
+                if sight is not None and sight_cost:
+                    nd += sight_cost * sight.exposed_m((u, v, k), pos0 + ru)
+                    if nd >= cost.get(nst, math.inf):
+                        continue
                 cost[nst] = nd
                 real[nst] = rl
                 back[nst] = (st, k)
@@ -223,13 +233,14 @@ def path_len(g: StreetGraph, edges) -> float:
 
 def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: random.Random,
                radius_m: float, keep_apart_m: float = 25.0, noise: float = 0.25,
-               turn_cost_m: float = 120.0):
+               turn_cost_m: float = 120.0, timing: PackTiming | None = None, sight_cost: float = 0.0):
     """One trail Start -> end shaped as a loop through two or three random waypoints.
 
     Waypoints sit ``radius_m`` (jittered) out from Start, at increasing angles
     measured from the direction of the Beer Near, so Start -> waypoints -> Beer
     Near -> back to Start goes round once and never has to cross itself. Each
-    stretch is an A* search that keeps clear of trail already laid.
+    stretch is an A* search that keeps clear of trail already laid and, given
+    ``timing``, shies away from streets the pack could see the hare on.
 
     Returns (edges, footprint) or None.
     """
@@ -250,6 +261,7 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
             return None
         wps.append(wp)
     fp = Footprint(geo, keep_apart_m)
+    sight = SightField(geo, timing) if (timing is not None and sight_cost) else None
     edges: list[tuple] = []
     visited = {start}
     walked = 0.0
@@ -259,11 +271,14 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
         seg = net.clear_path(edges[-1][1] if edges else start, goal, fp, "true", walked,
                              visited - ({edges[-1][1]} if edges else set()),
                              max_len=left, rng=rng, noise=noise,
-                             came_from=edges[-1][0] if edges else None, turn_cost_m=turn_cost_m)
+                             came_from=edges[-1][0] if edges else None, turn_cost_m=turn_cost_m,
+                             sight=sight, sight_cost=sight_cost)
         if seg is None:
             return None
         for e in seg:
             fp.add(e, "true", walked)
+            if sight is not None:
+                sight.add_edge(e, walked)
             walked += net.g.edge_length(*e)
             visited.add(e[1])
         edges += seg
@@ -360,8 +375,14 @@ def _arrow(node, nxt, **params) -> Mark:
 
 
 def place_marks(trail: Trail, g: StreetGraph, rng: random.Random,
-                opts: GenerateOptions | None = None, fp: Footprint | None = None) -> Trail:
-    """Replace the trail's marks and side legs with a layout that follows the hash rules."""
+                opts: GenerateOptions | None = None, fp: Footprint | None = None,
+                timing: PackTiming | None = None) -> Trail:
+    """Replace the trail's marks and side legs with a layout that follows the hash rules.
+
+    Given ``timing``, a turn where hounds checking the wrong ways would look
+    straight at the hare is less likely to get a check (it gets an arrow, and
+    maybe a check at the next corner instead).
+    """
     o = opts or GenerateOptions()
     geo = Geometry(g)
     tp = [(e.u, e.v, e.key) for e in trail.true_path]
@@ -378,19 +399,49 @@ def place_marks(trail: Trail, g: StreetGraph, rng: random.Random,
     turns = [c for c in cs if c.turn]
     by_s = {c.i: c.s for c in cs}
 
+    risky = lambda c: False  # noqa: E731
+    if timing is not None:
+        lines = SightLines(geo, 150.0 + 250.0)
+        d = np.arange(0.0, L, 10.0)
+        xs, ys = [], []
+        for x in d:
+            ep = _pos(tp, cum, float(x))
+            ec, ex, ey, _, _ = geo.edge_poly((ep.edge.u, ep.edge.v, ep.edge.key))
+            xs.append(float(np.interp(ep.offset_m, ec, ex)))
+            ys.append(float(np.interp(ep.offset_m, ec, ey)))
+        true_xy = np.column_stack([xs, ys])
+
+        def risky(c):
+            wrong = [nb for nb in c.ways if nb != c.nxt]
+            return check_looks_at_hare(geo, lines, timing, c.node, wrong, true_xy, d, c.s)
+
     # Checks at turns (and, rarely, fake checks on long straights); arrows at the other turns.
     kind: dict[int, str] = {}
     last = -math.inf
     last_mark = -math.inf
+    moved: list[Corner] = []  # risky turns that got an arrow: a check may go one corner on
     for c in turns:
         if c.s - last_mark <= COVER_M:
             continue  # the same street corner as the last mark (a sidewalk jog): one mark covers it
-        if 200.0 <= c.s <= L - 200.0 and c.s - last >= o.min_check_gap_m and rng.random() < o.check_share:
-            kind[c.i] = "check"
-            last = c.s
+        ok = 200.0 <= c.s <= L - 200.0 and c.s - last >= o.min_check_gap_m
+        if ok and rng.random() < o.check_share:
+            if not risky(c) or rng.random() < o.risky_check_share:
+                kind[c.i] = "check"
+                last = c.s
+            else:
+                kind[c.i] = "arrow"
+                moved.append(c)
         else:
             kind[c.i] = "arrow"
         last_mark = c.s
+    for m in moved:
+        # Arrow at the turn, then a check at the next corner (if it's a plain crossing, nearby and safe).
+        nxt = next((c for c in cs if c.s > m.s + COVER_M), None)
+        if (nxt is None or nxt.turn or nxt.s - m.s > 200.0 or len(nxt.ways) < 2 or nxt.s > L - 200.0
+                or any(abs(nxt.s - by_s[i]) < o.min_check_gap_m for i, k in kind.items() if k == "check")
+                or risky(nxt)):
+            continue
+        kind[nxt.i] = "check"
     marked_s = [0.0] + sorted(by_s[i] for i in kind) + [L]
     for a, b in zip(marked_s, marked_s[1:]):
         if b - a >= o.fake_check_after_m:
@@ -573,6 +624,7 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
     geo = Geometry(g)
     target = o.miles * METRES_PER_MILE
     back = o.return_miles * METRES_PER_MILE
+    timing = PackTiming.of(hare, pack)
 
     radius = target * 0.45 + back
     net = Network(g, start, radius)
@@ -600,7 +652,8 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
     per_end = max(1, o.tries // len(ends))
     for e in ends:
         for _ in range(per_end):
-            got = loop_route(net, geo, start, e, target, rng, radius, o.keep_apart_m)
+            got = loop_route(net, geo, start, e, target, rng, radius, o.keep_apart_m,
+                             timing=timing, sight_cost=o.sight_cost)
             if not got:
                 continue
             r, fp = got
@@ -649,7 +702,7 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
                            "generated": date.today().isoformat()})
         for p in range(o.placements):
             lo = o if p == 0 else vary_layout(o, rng)
-            t = place_marks(base, g, random.Random(rng.random()), lo, fp)
+            t = place_marks(base, g, random.Random(rng.random()), lo, fp, timing)
             model = TrailModel(t, g)
             results = simulate_many(t, g, pack, runs=o.runs, seed=rng.randrange(10**6), model=model)
             card = score_results(results, target, hare=hare)

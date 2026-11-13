@@ -98,6 +98,15 @@ Both the generator and the simulated hounds follow these (`autotrail.rules`):
   needs one mark, and its wrong leg ends in an F.
 * **Falses are few and short**: none, one or two per trail, a couple of blocks off a check,
   marked often enough to call On-On, then an F. The hare runs every false out and back.
+* **The pack never sees the hare.** A hound sees about 250 m down the street it's on (both
+  ways) until the street bends, and down every street from a corner it stands at. A real
+  sighting kills a trail (it turns into a footrace), so the score drops fast. A quick dash
+  across a street two blocks down costs little; running away down a street the pack is
+  looking along costs a lot. Two soft nudges in the generator: streets the pack could see when
+  the hare runs them cost more in the route search, and a turn where hounds checking the wrong
+  ways would look at the hare usually gets an arrow instead of a check (sometimes with a check
+  one corner on). Hounds seeing *other hounds* on another part of trail is fine: it pulls the
+  pack together.
 
 ## How the simulated pack behaves
 
@@ -129,6 +138,7 @@ wrong leg out and back. The replay shows the hare as a black dot ringed in yello
 | `cohesion` | 2 | finish spread, mean and worst front-to-back gap along the trail (each 0.5 at 3 min), less time the back hound has nobody within 150 m, less any hound that doesn't finish |
 | `check_effectiveness` | 1 | share of the front-to-back gap the checks close |
 | `hare_safety` | 2 | how close the front of the pack gets to the hare: full marks 2 min or more behind, zero if caught |
+| `hare_hidden` | 3 | seconds the hare spends in a hound's sightline (weighted: full up to 50 m away, 0.3 at 250 m); 8 s halves it |
 
 "Extra distance" (distance run minus true trail) is reported per hound and for the front and
 back quarter of the pack.

@@ -199,8 +199,46 @@ class HareSafety:
         return TermScore(self.name, v, self.weight, d)
 
 
+@dataclass
+class HareHidden:
+    """The pack never gets a look at the hare.
+
+    A real sighting kills a trail (hounds would chase, and it becomes a
+    footrace), so this falls fast: ``half_s`` weighted seconds in view halves
+    it. A dash across a street two blocks down costs a few seconds; running
+    away down the street a hound is looking along costs the whole time.
+    """
+    hare: HareProfile = field(default_factory=HareProfile)
+    weight: float = 3.0
+    half_s: float = 8.0
+    name: str = "hare_hidden"
+
+    def score(self, true_trail_m, results):
+        from .sight import hare_sightings
+
+        per_run, seen, closest, where = [], 0, [], []
+        for r in results:
+            sg = hare_sightings(r, self.hare.pace_s_per_m, self.hare.head_start_s)
+            exp = sum(x.exposure_s for x in sg)
+            per_run.append(exp)
+            if sg:
+                seen += 1
+                worst = max(sg, key=lambda x: x.exposure_s)
+                closest.append(min(x.closest_m for x in sg))
+                where.append(worst.hare_s)
+        if not per_run:
+            return TermScore(self.name, 1.0, self.weight, {})
+        v = mean(_half_at(e, self.half_s) for e in per_run)
+        d = {"seen_pct": 100 * seen / len(per_run), "exposure_s": median(per_run)}
+        if closest:
+            d["closest_m"] = median(closest)
+            d["worst_at_mi"] = median(where) / METRES_PER_MILE
+        return TermScore(self.name, v, self.weight, d)
+
+
 def default_terms(target_m: float | None, hare: HareProfile | None = None) -> list:
-    return [DistanceFit(target_m), Cohesion(), CheckEffectiveness(), HareSafety(hare or HareProfile())]
+    hare = hare or HareProfile()
+    return [DistanceFit(target_m), Cohesion(), CheckEffectiveness(), HareSafety(hare), HareHidden(hare)]
 
 
 def summarize(results: list[SimResult]) -> dict:
@@ -252,8 +290,16 @@ def format_report(card: ScoreCard, results: list[SimResult] | None = None) -> st
         if d.get("caught_pct", 0) > 0:
             msg = (f"Hare: caught in {d['caught_pct']:.0f}% of runs, around mi {d.get('caught_at_mi', 0):.2f}.")
         else:
-            msg = f"Hare: never caught; closest the pack gets is {d['closest_min']:.1f} min behind him."
-        lines += [msg + f" Falses and wrong legs add {d['hare_extra_mi']:.2f} mi to his run.", ""]
+            msg = f"Hare: never caught; closest the pack gets is {d['closest_min']:.1f} min behind the hare."
+        lines += [msg + f" Falses and wrong legs add {d['hare_extra_mi']:.2f} mi to the hare's run.", ""]
+    hh = next((t for t in card.terms if t.name == "hare_hidden"), None)
+    if hh is not None and hh.details:
+        d = hh.details
+        if d.get("seen_pct", 0) > 0:
+            lines += [f"Hare SEEN in {d['seen_pct']:.0f}% of runs (closest {d['closest_m']:.0f} m, "
+                      f"worst around mi {d['worst_at_mi']:.2f}). A real sighting kills a trail.", ""]
+        else:
+            lines += ["Hare: never in a hound's sightline.", ""]
     lines.append(f"  {'hound':<10} {'pace':>8} {'finish':>8} {'ran':>8} {'extra':>8}")
     for r in s["hounds"]:
         fin = f"{r['finish_min']:.1f}m" if r["finish_min"] is not None else "DNF"

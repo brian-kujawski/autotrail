@@ -447,6 +447,7 @@ class SimResult:
     side_detours: list[tuple[float, float]]   # (metres along trail, metres the hare runs out and back)
     seed: int
     raw: list[Hound] = field(default_factory=list, repr=False)
+    model: TrailModel | None = field(default=None, repr=False)
 
     @property
     def finishers(self) -> list[HoundResult]:
@@ -845,7 +846,7 @@ class Simulation:
             if len(v):
                 front.append((float(s), float(v.min())))
         return SimResult(m.L, hounds, checks, gap_profile, front, list(m.side_detours), self.seed,
-                         raw=self.hounds)
+                         raw=self.hounds, model=m)
 
 
 def first_passage(h: Hound, track: Track, targets: np.ndarray) -> np.ndarray:
@@ -863,6 +864,41 @@ def first_passage(h: Hound, track: Track, targets: np.ndarray) -> np.ndarray:
         if len(idx):
             out[idx] = l.t0 + (targets[idx] - l.s0) / (l.s1 - l.s0) * (l.t1 - l.t0)
     return out
+
+
+def hare_legs(model: TrailModel, pace_s_per_m: float, head_start_s: float) -> list[Leg]:
+    """The hare's run as timed legs: the true trail plus each false out to its F and back.
+
+    Time 0 is when the pack starts; the hare starts ``head_start_s`` earlier.
+    """
+    plan, s_prev = [], 0.0
+    for c in model.checks:
+        for o in c.options:
+            if o.kind == "false":
+                plan += [(model.true, s_prev, c.s), (o.track, 0.0, o.false_s), (o.track, o.false_s, 0.0)]
+                s_prev = c.s
+    plan.append((model.true, s_prev, model.L))
+    t, legs = -head_start_s, []
+    for track, a, b in plan:
+        dt = abs(b - a) * pace_s_per_m
+        legs.append(Leg(track, a, b, t, t + dt))
+        t += dt
+    return legs
+
+
+def legs_at(legs: list[Leg], times: np.ndarray) -> tuple[list, np.ndarray]:
+    """(track or None, metres along it) for each time; None outside the legs."""
+    tracks: list = [None] * len(times)
+    s = np.full(len(times), np.nan)
+    for l in legs:
+        a, b = np.searchsorted(times, l.t0, "left"), np.searchsorted(times, l.t1, "right")
+        if a >= b:
+            continue
+        tt = times[a:b]
+        f = (tt - l.t0) / (l.t1 - l.t0) if l.t1 > l.t0 else np.zeros_like(tt)
+        s[a:b] = l.s0 + (l.s1 - l.s0) * f
+        tracks[a:b] = [l.track] * (b - a)
+    return tracks, s
 
 
 def sample_tracks(result: SimResult, dt: float = 5.0):
