@@ -204,6 +204,12 @@ class Footprint:
         self.cells: dict[tuple[int, int], list[tuple[float, float, str, float]]] = {}
         self.zones: list[tuple[float, float, float]] = []  # (x, y, r): ignore points in here
 
+    @property
+    def recent_default(self) -> float:
+        # Round a 90-degree corner and the two streets are within r of each other for ~1.4 r
+        # of trail either side; a sharper corner needs more. 2.5 r covers a 60-degree corner.
+        return max(50.0, 2.5 * self.r)
+
     def _samples(self, e: tuple):
         """[(metres along, x, y)] every ``step_m`` along the edge (cached on the Geometry)."""
         cache = self.geo.__dict__.setdefault("_samples", {})
@@ -232,11 +238,14 @@ class Footprint:
     def in_zone(self, x, y) -> bool:
         return any((x - zx) ** 2 + (y - zy) ** 2 <= zr * zr for zx, zy, zr in self.zones)
 
-    def clashes(self, e: tuple, tag: str, pos0: float, recent_m: float = 50.0) -> bool:
+    def clashes(self, e: tuple, tag: str, pos0: float, recent_m: float | None = None) -> bool:
         """Would edge e (starting ``pos0`` metres along leg ``tag``) come too close to trail?
 
-        Points of the same leg laid in the last ``recent_m`` metres don't count.
+        Points of the same leg laid in the last ``recent_m`` metres don't count
+        (default ``recent_default``: enough that turning a corner, even a sharp
+        one, doesn't count as coming near the street you just left).
         """
+        recent_m = self.recent_default if recent_m is None else recent_m
         r2 = self.r * self.r
         for di, x, y in self._samples(e):
             here = pos0 + di
@@ -252,8 +261,9 @@ class Footprint:
                             return True
         return False
 
-    def node_clear(self, n, tag: str, pos: float, recent_m: float = 50.0) -> bool:
+    def node_clear(self, n, tag: str, pos: float, recent_m: float | None = None) -> bool:
         """Is node n clear of earlier trail (ignoring the recent stretch of leg ``tag``)?"""
+        recent_m = self.recent_default if recent_m is None else recent_m
         x, y = self.geo.node_xy(n)
         if self.zones and self.in_zone(x, y):
             return True
@@ -268,7 +278,7 @@ class Footprint:
                         return False
         return True
 
-    def path_clashes(self, edges, tag: str, pos0: float = 0.0, recent_m: float = 50.0) -> bool:
+    def path_clashes(self, edges, tag: str, pos0: float = 0.0, recent_m: float | None = None) -> bool:
         """Check a whole path, adding it as it goes (on a copy-free trial basis: caller decides)."""
         pos = pos0
         for e in edges:

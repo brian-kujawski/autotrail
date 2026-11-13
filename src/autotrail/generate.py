@@ -289,16 +289,23 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
     stops = wps + [end]
     for i, goal in enumerate(stops):
         left = target_m * 1.25 - walked
-        seg = net.clear_path(edges[-1][1] if edges else start, goal, fp, "true", walked,
-                             visited - ({edges[-1][1]} if edges else set()),
-                             max_len=left, rng=rng, noise=noise,
-                             came_from=edges[-1][0] if edges else None, turn_cost_m=turn_cost_m,
-                             sight=sight, sight_cost=sight_cost,
-                             straight_run_m=straight_run_m, straight_cost=straight_cost)
+        kw = dict(max_len=left, rng=rng, noise=noise, came_from=edges[-1][0] if edges else None,
+                  turn_cost_m=turn_cost_m)
+        here = edges[-1][1] if edges else start
+        banned = visited - ({edges[-1][1]} if edges else set())
+        tries = [dict(sight=sight, sight_cost=sight_cost, straight_run_m=straight_run_m,
+                      straight_cost=straight_cost)]
+        if sight_cost or straight_cost:
+            tries.append({})  # the nudges are preferences, never the reason there's no route
+        seg = None
+        for extra in tries:
+            seg = net.clear_path(here, goal, fp, "true", walked, banned, **kw, **extra)
+            # The search checks against earlier stretches only; this one mustn't touch itself either.
+            if seg is not None and not fp.copy().path_clashes(seg, "true", walked):
+                break
+            seg = None
         if seg is None:
             return None
-        if fp.copy().path_clashes(seg, "true", walked):
-            return None  # the search checks against earlier stretches only; this one mustn't touch itself
         for e in seg:
             fp.add(e, "true", walked)
             if sight is not None:

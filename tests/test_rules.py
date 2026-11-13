@@ -50,3 +50,11 @@ def test_is_sidewalk():
     assert is_sidewalk({"highway": "footway", "footway": ["crossing", "sidewalk"]})
     assert not is_sidewalk({"highway": "footway"})
     assert not is_sidewalk({"highway": "residential"})
+
+
+def test_turning_a_corner_is_not_coming_near_yourself(grid):
+    # Round a square corner and the two streets are within 45 m of each other for ~32 m either side.
+    geo = Geometry(StreetGraph(grid, area_key="grid"))
+    path = [(grid_id(1, 1), grid_id(2, 1), 0), (grid_id(2, 1), grid_id(2, 2), 0)]
+    assert not Footprint(geo, 45.0).path_clashes(path, "true")
+    assert Footprint(geo, 45.0).path_clashes(path, "true", recent_m=50.0)  # the old, too-short exemption
