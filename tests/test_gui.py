@@ -134,3 +134,23 @@ def test_picked_point_mid_block_is_kept(tmp_path):
     assert ((x0 - x1) ** 2 + (y0 - y1) ** 2) ** 0.5 < 1.0
     assert t.validate(g) == []
     assert t.return_path and t.return_path[-1].v == t.start
+
+
+def test_snap_after_split_uses_the_pieces():
+    """Splitting a street for a picked end keeps the click index valid without a rebuild."""
+    from conftest import build_city
+
+    from autotrail.graph import StreetGraph, annotate
+
+    G = build_city()
+    annotate(G)
+    g = StreetGraph(G, area_key="city")
+    tree, _ = g.edge_index()
+    a, b = g.node_lonlat(BEER), g.node_lonlat(BEER + 1)
+    third = (a[0] + (b[0] - a[0]) / 3, a[1])
+    n = g.node_at(*third)
+    assert n < 0
+    two_thirds = (a[0] + 2 * (b[0] - a[0]) / 3, a[1])
+    (u, v, k), _, dist = g.nearest_edge(*two_thirds)
+    assert g.G.has_edge(u, v, k) and n in (u, v) and dist < 10
+    assert g.edge_index()[0] is tree  # not rebuilt
