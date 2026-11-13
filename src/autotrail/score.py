@@ -244,13 +244,15 @@ def dull_stretches(model, dull_m: float) -> list[tuple[float, float]]:
 
 @dataclass
 class Variety:
-    """Any quarter mile with nothing for the pack to do (no check or whichy-way) is a negative.
+    """Long straightaways and quarter miles with nothing for the pack to do are negatives.
 
-    Soft: ``half_m`` metres of dull trail past the first quarter mile of each
-    stretch halves it, so a trail whose best features need a long straight
-    can still win.
+    A dead straight street lets the front runners pull away, even with checks
+    on it; and any quarter mile with no check or whichy-way is dull. Soft: each
+    ``half_m`` of straightaway past a quarter mile, or of dull trail past a
+    quarter mile, halves it, so a trail whose best features need a long
+    straight can still win.
     """
-    weight: float = 1.0
+    weight: float = 2.0
     dull_m: float = 402.0
     half_m: float = 800.0
     name: str = "variety"
@@ -258,14 +260,20 @@ class Variety:
     def score(self, true_trail_m, results):
         if not results or results[0].model is None:
             return TermScore(self.name, 1.0, self.weight, {})
+        from .rules import straight_runs
+
         m = results[0].model
         dull = dull_stretches(m, self.dull_m)
         excess = sum(b - a - self.dull_m for a, b in dull)
+        runs = [(a, b) for a, b in straight_runs(m.geo, m.true.edges, m.true.cum) if b - a > self.dull_m]
+        straight_excess = sum(b - a - self.dull_m for a, b in runs)
         straight = sum(c.fake for c in m.checks)
-        d = {"dull_stretches": len(dull), "dull_excess_mi": excess / METRES_PER_MILE,
-             "longest_mi": max((b - a for a, b in dull), default=0.0) / METRES_PER_MILE,
+        d = {"longest_straight_mi": max((b - a for a, b in runs), default=0.0) / METRES_PER_MILE,
+             "straight_excess_mi": straight_excess / METRES_PER_MILE,
+             "dull_excess_mi": excess / METRES_PER_MILE,
              "straight_on_checks": f"{straight}/{len(m.checks)}"}
-        return TermScore(self.name, _half_at(excess, self.half_m), self.weight, d)
+        v = _half_at(excess, self.half_m) * _half_at(straight_excess, self.half_m)
+        return TermScore(self.name, v, self.weight, d)
 
 
 def default_terms(target_m: float | None, hare: HareProfile | None = None) -> list:

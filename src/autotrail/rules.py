@@ -185,6 +185,19 @@ def jog_corners(geo: Geometry, edges: list[tuple], cum) -> set[int]:
     return out
 
 
+def straight_runs(geo: Geometry, edges: list[tuple], cum) -> list[tuple[float, float]]:
+    """(from, to) metres of each straightaway: corners where the way on is within ``STRAIGHT_DEG``
+    of the way in don't break it, whatever the marks say."""
+    out, a = [], 0.0
+    for i in range(1, len(edges)):
+        if geo.deviation(edges[i - 1][0], edges[i][0], edges[i][1]) > STRAIGHT_DEG:
+            out.append((a, float(cum[i])))
+            a = float(cum[i])
+    if edges:
+        out.append((a, float(cum[len(edges)])))
+    return out
+
+
 def turn_angle(geo: Geometry, prev, node, nxt) -> float:
     """Absolute turn in radians going prev -> node -> nxt (0 = straight on)."""
     return math.radians(geo.deviation(prev, node, nxt))
@@ -203,6 +216,12 @@ class Footprint:
         self.geo, self.r, self.step = geo, radius_m, step_m
         self.cells: dict[tuple[int, int], list[tuple[float, float, str, float]]] = {}
         self.zones: list[tuple[float, float, float]] = []  # (x, y, r): ignore points in here
+
+    @property
+    def recent_default(self) -> float:
+        # Round a 90-degree corner and the two streets are within r of each other for ~1.4 r
+        # of trail either side; a sharper corner needs more. 2.5 r covers a 60-degree corner.
+        return max(50.0, 2.5 * self.r)
 
     def _samples(self, e: tuple):
         """[(metres along, x, y)] every ``step_m`` along the edge (cached on the Geometry)."""
@@ -232,11 +251,14 @@ class Footprint:
     def in_zone(self, x, y) -> bool:
         return any((x - zx) ** 2 + (y - zy) ** 2 <= zr * zr for zx, zy, zr in self.zones)
 
-    def clashes(self, e: tuple, tag: str, pos0: float, recent_m: float = 50.0) -> bool:
+    def clashes(self, e: tuple, tag: str, pos0: float, recent_m: float | None = None) -> bool:
         """Would edge e (starting ``pos0`` metres along leg ``tag``) come too close to trail?
 
-        Points of the same leg laid in the last ``recent_m`` metres don't count.
+        Points of the same leg laid in the last ``recent_m`` metres don't count
+        (default ``recent_default``: enough that turning a corner, even a sharp
+        one, doesn't count as coming near the street you just left).
         """
+        recent_m = self.recent_default if recent_m is None else recent_m
         r2 = self.r * self.r
         for di, x, y in self._samples(e):
             here = pos0 + di
@@ -252,8 +274,9 @@ class Footprint:
                             return True
         return False
 
-    def node_clear(self, n, tag: str, pos: float, recent_m: float = 50.0) -> bool:
+    def node_clear(self, n, tag: str, pos: float, recent_m: float | None = None) -> bool:
         """Is node n clear of earlier trail (ignoring the recent stretch of leg ``tag``)?"""
+        recent_m = self.recent_default if recent_m is None else recent_m
         x, y = self.geo.node_xy(n)
         if self.zones and self.in_zone(x, y):
             return True
@@ -268,7 +291,7 @@ class Footprint:
                         return False
         return True
 
-    def path_clashes(self, edges, tag: str, pos0: float = 0.0, recent_m: float = 50.0) -> bool:
+    def path_clashes(self, edges, tag: str, pos0: float = 0.0, recent_m: float | None = None) -> bool:
         """Check a whole path, adding it as it goes (on a copy-free trial basis: caller decides)."""
         pos = pos0
         for e in edges:

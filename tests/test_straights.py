@@ -91,3 +91,32 @@ def test_a_run_of_whichy_ways_ends_in_a_turn(city):
             if all(c.fake for c in w[i:i + 3]) and not w[i + 3].fake:
                 found = True
     assert found
+
+
+def test_a_straight_avenue_with_a_parallel_sidewalk_still_counts_as_straight():
+    """At a crossing where a sidewalk peels off at a shallow angle there's no single 'straight on',
+    but the street is still a straightaway."""
+    from autotrail.rules import straight_runs
+
+    pos = {i: (100.0 * i, 0.0) for i in range(8)}
+    pos.update({100 + i: (100.0 * i + 60, 12.0) for i in range(7)})  # stubs ~11 degrees off, at each corner
+    G = nx.MultiDiGraph(crs="epsg:4326")
+    for n, (x, y) in pos.items():
+        lon, lat = ll(x, y)
+        G.add_node(n, x=lon, y=lat, street_count=0)
+
+    def link(a, b, hw="residential"):
+        (xa, ya), (xb, yb) = pos[a], pos[b]
+        for u, v in ((a, b), (b, a)):
+            G.add_edge(u, v, length=math.hypot(xa - xb, ya - yb), highway=hw, oneway=False,
+                       reversed=u != a, osmid=a * 1000 + b)
+
+    for i in range(7):
+        link(i, i + 1)
+        link(i, 100 + i, "footway")
+    annotate(G)
+    g = StreetGraph(G, area_key="avenue")
+    geo = Geometry(g)
+    edges = [(i, i + 1, 0) for i in range(7)]
+    assert geo.straight_on(0, 1) is None  # ambiguous at every corner...
+    assert straight_runs(geo, edges, _cum(g, edges)) == [(0.0, 700.0)]  # ...but one 700 m straightaway

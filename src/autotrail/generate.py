@@ -38,7 +38,7 @@ import numpy as np
 
 from .graph import StreetGraph
 from .pack import HareProfile, HoundProfile, default_pack
-from .rules import COVER_M, Footprint, Geometry, is_sidewalk, jog_corners
+from .rules import COVER_M, STRAIGHT_DEG, Footprint, Geometry, is_sidewalk, jog_corners
 from .score import DistanceFit, ScoreCard, score_results
 from .sight import PackTiming, SightField, SightLines, check_looks_at_hare
 from .sim import SimResult, TrailModel, simulate_many
@@ -199,7 +199,10 @@ class Network:
                     nd += turn_cost_m
                 rn = l
                 if straight_cost:
-                    rn = run[st] + l if (p is None or v == straight) else l
+                    # A straightaway is what the pack sees, not what the marks say: any way on within
+                    # STRAIGHT_DEG of the way in keeps the run going (a crossing with a parallel
+                    # sidewalk or median has no single "straight on", but the street is still straight).
+                    rn = run[st] + l if (p is None or geo.deviation(p, u, v) <= STRAIGHT_DEG) else l
                     nd += straight_cost * (max(0.0, rn - straight_run_m) - max(0.0, rn - l - straight_run_m))
                 nst = (v, u)
                 if nd >= cost.get(nst, math.inf):
@@ -254,7 +257,7 @@ def path_len(g: StreetGraph, edges) -> float:
 def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: random.Random,
                radius_m: float, keep_apart_m: float = 25.0, noise: float = 0.25,
                turn_cost_m: float = 120.0, timing: PackTiming | None = None, sight_cost: float = 0.0,
-               straight_run_m: float = math.inf, straight_cost: float = 0.0):
+               straight_run_m: float = math.inf, straight_cost: float = 0.0, stats: dict | None = None):
     """One trail Start -> end shaped as a loop through two or three random waypoints.
 
     Waypoints sit ``radius_m`` (jittered) out from Start, at increasing angles
@@ -289,16 +292,27 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
     stops = wps + [end]
     for i, goal in enumerate(stops):
         left = target_m * 1.25 - walked
-        seg = net.clear_path(edges[-1][1] if edges else start, goal, fp, "true", walked,
-                             visited - ({edges[-1][1]} if edges else set()),
-                             max_len=left, rng=rng, noise=noise,
-                             came_from=edges[-1][0] if edges else None, turn_cost_m=turn_cost_m,
-                             sight=sight, sight_cost=sight_cost,
-                             straight_run_m=straight_run_m, straight_cost=straight_cost)
+        kw = dict(max_len=left, rng=rng, noise=noise, came_from=edges[-1][0] if edges else None,
+                  turn_cost_m=turn_cost_m)
+        here = edges[-1][1] if edges else start
+        banned = visited - ({edges[-1][1]} if edges else set())
+        nudges = dict(sight=sight, sight_cost=sight_cost, straight_run_m=straight_run_m, straight_cost=straight_cost)
+        tries = [nudges]
+        if sight_cost or straight_cost:
+            # The nudges make the search wander further before it finds the goal: give it room
+            # before falling back to no nudges (they're preferences, never the reason there's no route).
+            tries += [nudges | {"max_expand": 400000}, {}]
+        seg = None
+        for k, extra in enumerate(tries):
+            seg = net.clear_path(here, goal, fp, "true", walked, banned, **kw, **extra)
+            # The search checks against earlier stretches only; this one mustn't touch itself either.
+            if seg is not None and not fp.copy().path_clashes(seg, "true", walked):
+                if stats is not None and k:
+                    stats["unnudged" if not extra else "wider"] = stats.get("unnudged" if not extra else "wider", 0) + 1
+                break
+            seg = None
         if seg is None:
             return None
-        if fp.copy().path_clashes(seg, "true", walked):
-            return None  # the search checks against earlier stretches only; this one mustn't touch itself
         for e in seg:
             fp.add(e, "true", walked)
             if sight is not None:
@@ -733,6 +747,7 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
         ends = rng.sample(ring, min(6, len(ring)))
 
     routes = []
+    stats: dict = {}
     # Loop size: perimeter ~ (2 + 2 sin(half the spread)) * radius, times ~1.3 for streets.
     radius = target / 4.6
     per_end = max(1, o.tries // len(ends))
@@ -740,7 +755,7 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
         for _ in range(per_end):
             got = loop_route(net, geo, start, e, target, rng, radius, o.keep_apart_m,
                              turn_cost_m=o.turn_cost_m, timing=timing, sight_cost=o.sight_cost,
-                             straight_run_m=o.straight_run_m, straight_cost=o.straight_cost)
+                             straight_run_m=o.straight_run_m, straight_cost=o.straight_cost, stats=stats)
             if not got:
                 continue
             r, fp = got
@@ -779,6 +794,9 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
     if not picked:
         raise RuntimeError("Found routes, but none with a leg back to Start that keeps clear of the trail")
     say(f"Tried {len(routes)} routes; simulating marks on the best {len(picked)}")
+    if stats.get("unnudged"):
+        say(f"Note: {stats['unnudged']} stretch(es) found no route with the long-straight and hare-sight "
+            "nudges and were routed without them")
 
     best: Generated | None = None
     tried = []
