@@ -69,7 +69,9 @@ class GenerateOptions:
     whichy_ways: tuple[int, int] = (0, 1)
     whichy_leg_m: tuple[float, float] = (50.0, 100.0)
     exact_ends: bool = False          # Start/Beer Near were picked by hand: keep them unless a dead end
-    turn_cost_m: float = 120.0        # route search: leaving a corner other than straight on costs this
+    # Route search: a turn costs the hare only the ~3 s it takes to bend down and mark it, about
+    # 8 m at hare pace. Turns slow the pack far more than the hare, so they aren't avoided.
+    turn_cost_m: float = 8.0
     straight_run_m: float = 400.0     # route search: a straight longer than this...
     straight_cost: float = 3.0        # ...costs this much extra per metre past it (long straights spread the pack)
     sight_cost: float = 3.0           # each metre the pack could see the hare run costs this many extra
@@ -144,8 +146,8 @@ class Network:
         """A* a -> b that avoids ``banned`` nodes and keeps clear of the footprint.
 
         The heuristic is straight-line distance. Leaving a corner any way but
-        straight on costs ``turn_cost_m`` extra (each such turn needs a mark),
-        so routes run along streets instead of staircasing. With ``noise`` > 0
+        straight on costs ``turn_cost_m`` extra: the few seconds the hare takes
+        to mark it (each such turn needs a mark). With ``noise`` > 0
         each street costs up to (1 + noise) times its length, drawn at random,
         so repeated searches find different, still sensible, routes. With a
         ``sight`` field, each metre the pack could see the hare run costs
@@ -257,7 +259,7 @@ def path_len(g: StreetGraph, edges) -> float:
 
 def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: random.Random,
                radius_m: float, keep_apart_m: float = 25.0, noise: float = 0.25,
-               turn_cost_m: float = 120.0, timing: PackTiming | None = None, sight_cost: float = 0.0,
+               turn_cost_m: float = 8.0, timing: PackTiming | None = None, sight_cost: float = 0.0,
                straight_run_m: float = math.inf, straight_cost: float = 0.0, stats: dict | None = None):
     """One trail Start -> end shaped as a loop through two or three random waypoints.
 
