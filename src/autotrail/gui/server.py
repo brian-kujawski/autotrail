@@ -36,6 +36,7 @@ from importlib import resources
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from ..facts import summary
 from ..graph import StreetGraph
 from ..pipeline import RunSettings, preview_walk_mi, run
 from ..trail import METRES_PER_MILE
@@ -230,6 +231,8 @@ class GuiApp:
             r.update(miles=round(info["length_m"] / METRES_PER_MILE, 2),
                      turns_per_mile=round(info["turns_per_mile"], 1),
                      score=round(info["score"], 3) if "score" in info else None)
+        if job.step and info.get("facts") is not None:
+            r["facts"] = self._facts(info["facts"](), line, latlon)
         job.route = r
         job.tally["ok" if info["ok"] else "failed"] += 1
         what = f"{r['miles']} mi, {r['turns_per_mile']} turns/mi" if info["ok"] else f"failed: {r['reason']}"
@@ -244,6 +247,29 @@ class GuiApp:
             job.waiting = False
             if job.stop:
                 raise Stopped()
+
+    def _facts(self, facts, line, latlon) -> dict:
+        """Corner facts, drawable: each wrong way as a coloured stub, with a note for its tooltip."""
+        g = self.g
+        ways, eyes = [], []
+        for f in facts:
+            where = f"{f.s / METRES_PER_MILE:.2f} mi in, {'turn' if f.turn else 'straight on'}"
+            for w in f.ways:
+                if w.kind == "busy":
+                    continue
+                note = {"shortcut": "shortcut: {walk:.0f} m on foot skips {skip:.0f} m of trail",
+                        "way_back": "shortcut to the way back: {walk:.0f} m on foot",
+                        "rejoins": "meets trail after {walk:.0f} m but saves little",
+                        "dead_end": "dead end (everything down it is within 250 m)",
+                        "open": "no trail within 250 m: a safe wrong way",
+                        "back": "heads back the way hounds came"}[w.kind]
+                note = note.format(walk=w.walk_m or 0.0, skip=w.skip_m or 0.0)
+                edges = [(a, b, g.best_key(a, b)) for a, b in zip(w.path, w.path[1:])]
+                ways.append({"kind": w.kind, "line": line(edges),
+                             "note": f"{where}: {note}" + (" · checkers here would see the hare" if w.sees_hare else "")})
+            if f.sees_hare:
+                eyes.append({"at": latlon(f.node), "note": f"{where}: hounds checking here would see the hare"})
+        return {"ways": ways, "eyes": eyes, "summary": summary(facts)}
 
     def list_runs(self) -> list[dict]:
         out = []

@@ -136,6 +136,13 @@ Both the generator and the simulated hounds follow these (`autotrail.rules`):
   Three marks past a check solve it ("On one", "On two", "On-On"). A whichy-way (two arrows on
   the ground) needs one mark on the right way; the wrong way has no marks at all, so it costs
   the hare nothing. Most turns without a check get a whichy-way; arrows are used sparingly.
+* **Know where every wrong way leads** (`autotrail.facts`). With the whole route known, each
+  way off trail at each corner is walked out up to 250 m on foot (any path type but freeways
+  and trunk roads). It's a **shortcut** if it meets trail still to come, or the way back, and
+  skips at least 3x what it cost (and 100 m or more); otherwise it meets trail but saves
+  little, is a dead end, or is safe. Each corner also notes whether checkers would see the
+  hare. Step-through mode draws these on every kept route. Mark placement doesn't use them
+  yet (that's the next step of the mark pass).
 * **Falses are few and short**: none, one or two per trail, a couple of blocks off a check,
   marked often enough to call On-On, then an F. The hare runs every false out and back.
 * **The pack never sees the hare.** A hound sees about 250 m down the street it's on (both

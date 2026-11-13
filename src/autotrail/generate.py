@@ -39,6 +39,7 @@ from datetime import date
 
 import numpy as np
 
+from .facts import corner_facts
 from .graph import StreetGraph
 from .pack import HareProfile, HoundProfile, default_pack
 from .rules import CORRIDOR_M, COVER_M, STRAIGHT_DEG, Footprint, Geometry, is_sidewalk, jog_corners, turns_per_mile
@@ -951,6 +952,8 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
                 fit = DistanceFit(target).score(length, []).value
                 tpm = turns_per_mile(geo, r, _cum(g, r))
                 info.update(length_m=length, turns_per_mile=tpm, fit=fit)
+                # Corner facts are worth working out only when someone looks (step-through mode).
+                info["facts"] = (lambda r=r, ret=ret: corner_facts(g, r, ret, timing, geo))
                 if fit <= 0:
                     info["reason"] = f"{length / METRES_PER_MILE:.2f} mi: too far off {o.miles:g} mi"
                 else:
