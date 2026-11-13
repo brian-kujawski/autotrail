@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autotrail</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a66; --line: #e2e0da;
+  --accent: #c2410c; --accent-ink: #ffffff; --start: #15803d; --beer: #b45309;
+  --bad: #b91c1c; --good: #15803d; --chip: #f1efe9;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #171716; --panel: #1f1f1d; --ink: #ecebe6; --muted: #a09e97; --line: #34332f;
+    --accent: #f97316; --accent-ink: #1a1a1a; --start: #4ade80; --beer: #fbbf24;
+    --bad: #f87171; --good: #4ade80; --chip: #2a2926;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+       display: grid; grid-template-columns: 360px 1fr; }
+aside { background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; padding: 16px 18px 24px; }
+main { position: relative; display: flex; flex-direction: column; min-width: 0; }
+h1 { font-size: 18px; margin: 0 0 2px; letter-spacing: .2px; }
+.sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 18px 0 8px; }
+.pins { display: grid; gap: 8px; }
+.pin { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid var(--line);
+       border-radius: 8px; cursor: pointer; background: var(--panel); text-align: left; color: var(--ink); font: inherit; }
+.pin.active { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
+.pin .dot { width: 14px; height: 14px; border-radius: 50%; flex: none; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.3); }
+.pin .what { font-weight: 600; }
+.pin .where { color: var(--muted); font-size: 12px; }
+.pin[disabled] { opacity: .5; cursor: default; }
+.note { font-size: 12px; color: var(--muted); margin-top: 6px; min-height: 1em; }
+.note.bad { color: var(--bad); }
+label.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 6px 0; }
+label.check { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+input[type=number], input[type=text] { width: 96px; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px;
+       background: var(--bg); color: var(--ink); font: inherit; }
+details { margin-top: 8px; }
+summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+button.go { width: 100%; margin-top: 16px; padding: 11px; border: 0; border-radius: 8px; background: var(--accent);
+       color: var(--accent-ink); font: 600 15px system-ui, sans-serif; cursor: pointer; }
+button.go[disabled] { opacity: .5; cursor: default; }
+button.small { padding: 4px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--chip);
+       color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; }
+.seed { display: flex; gap: 6px; align-items: center; }
+#log { font: 12px/1.5 ui-monospace, Consolas, monospace; background: var(--chip); border-radius: 8px; padding: 8px 10px;
+       margin-top: 12px; max-height: 160px; overflow-y: auto; white-space: pre-wrap; display: none; }
+#result { display: none; margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.score { font-size: 30px; font-weight: 700; }
+.score small { font-size: 14px; color: var(--muted); font-weight: 400; }
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin: 8px 0; font-size: 13px; }
+.stats span { color: var(--muted); }
+.links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.links a { color: var(--accent); font-size: 13px; }
+pre.report { font-size: 11px; white-space: pre-wrap; background: var(--chip); padding: 8px; border-radius: 6px; }
+#runs { display: grid; gap: 6px; }
+.runrow { display: flex; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer;
+          border: 1px solid var(--line); font-size: 12px; }
+.runrow:hover { background: var(--chip); }
+.tabs { display: flex; gap: 4px; padding: 8px 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.tab { padding: 6px 12px; border-radius: 6px; border: 0; background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
+.tab.on { background: var(--chip); color: var(--ink); font-weight: 600; }
+.tab[disabled] { opacity: .4; cursor: default; }
+#map, #replay { flex: 1; min-height: 0; border: 0; }
+#replay { display: none; width: 100%; }
+.hint { position: absolute; top: 58px; left: 50%; transform: translateX(-50%); z-index: 500; background: var(--panel);
+        color: var(--ink); border: 1px solid var(--line); border-radius: 999px; padding: 6px 14px; font-size: 13px;
+        box-shadow: 0 2px 8px rgba(0,0,0,.15); pointer-events: none; }
+.marker { width: 26px; height: 26px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.5);
+          display: grid; place-items: center; color: #fff; font: 700 12px system-ui, sans-serif; }
+@media (max-width: 760px) {
+  body { grid-template-columns: 1fr; grid-template-rows: 55vh auto; }
+  main { grid-row: 1; }
+  aside { grid-row: 2; border-right: 0; border-top: 1px solid var(--line); padding: 14px 16px; }
+}
+</style>
+</head>
+<body>
+<aside>
+  <h1>Autotrail</h1>
+  <div class="sub" id="area">Loading map…</div>
+
+  <h2>1. Pick the ends</h2>
+  <div class="pins">
+    <button class="pin active" id="pinStart" type="button">
+      <span class="dot" style="background:var(--start)"></span>
+      <span><div class="what">Start</div><div class="where" id="startWhere">Click the map</div></span>
+    </button>
+    <button class="pin" id="pinBeer" type="button">
+      <span class="dot" style="background:var(--beer)"></span>
+      <span><div class="what">Beer Near</div><div class="where" id="beerWhere">Then click where the cooler goes</div></span>
+    </button>
+  </div>
+  <label class="check"><input type="checkbox" id="autoBeer"> Let Autotrail pick the Beer Near</label>
+  <div class="note" id="walkNote"></div>
+
+  <h2>2. Trail</h2>
+  <label class="row">Trail length, Start to Beer Near (mi) <input type="number" id="miles" step="0.25" min="0.5" max="15"></label>
+  <label class="check"><input type="checkbox" id="returnLeg"> Hared leg back to Start</label>
+  <label class="row" id="returnMilesRow" style="display:none">Beer Near about this far from Start (mi)
+    <input type="number" id="return_miles" step="0.25" min="0.25" max="5"></label>
+  <label class="row">Seed <span class="seed"><input type="number" id="seed" step="1" min="0"><button class="small" id="dice" type="button" title="Random seed">🎲</button></span></label>
+  <details>
+    <summary>Pack, hare and search</summary>
+    <label class="row">Runners <input type="number" id="runners" min="1" max="60"></label>
+    <label class="row">Fastest pace (min:sec/mi) <input type="text" id="fastest"></label>
+    <label class="row">Slowest pace (min:sec/mi) <input type="text" id="slowest"></label>
+    <label class="row">Hare pace while marking <input type="text" id="hare_pace"></label>
+    <label class="row">Hare head start (min) <input type="number" id="head_start_min" min="0" max="60"></label>
+    <label class="row">Route attempts <input type="number" id="tries" min="10" max="2000" step="10"></label>
+    <label class="row">Sim runs for the report <input type="number" id="runs" min="1" max="200"></label>
+    <div class="note">Fewer route attempts is faster. Route search is most of the time.</div>
+  </details>
+
+  <button class="go" id="go" type="button" disabled>Generate trail</button>
+  <div id="log"></div>
+
+  <div id="result">
+    <div class="score" id="rScore"></div>
+    <div class="stats" id="rStats"></div>
+    <div class="links" id="rLinks"></div>
+    <div class="links"><button class="small" id="again" type="button">Try another seed</button></div>
+    <details><summary>Full scorecard</summary><pre class="report" id="rReport"></pre></details>
+  </div>
+
+  <h2>Earlier runs</h2>
+  <div id="runs"><div class="note">None yet.</div></div>
+</aside>
+
+<main>
+  <div class="tabs">
+    <button class="tab on" id="tabPick" type="button">Pick on map</button>
+    <button class="tab" id="tabResult" type="button" disabled>Trail and replay</button>
+  </div>
+  <div id="map"></div>
+  <iframe id="replay" title="Trail replay"></iframe>
+  <div class="hint" id="hint">Click the map to set Start</div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const FIELDS = ["miles", "return_miles", "seed", "runners", "fastest", "slowest", "hare_pace", "head_start_min", "tries", "runs"];
+const state = { mode: "start", start: null, beer: null, auto: false, job: null, ok: false };
+let map;
+
+function icon(colour, text) {
+  return L.divIcon({ className: "", iconSize: [26, 26], iconAnchor: [13, 13],
+    html: `<div class="marker" style="background:${colour}">${text}</div>` });
+}
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || r.statusText);
+  return body;
+}
+
+function setMode(m) {
+  state.mode = m;
+  $("pinStart").classList.toggle("active", m === "start");
+  $("pinBeer").classList.toggle("active", m === "beer");
+  hint();
+}
+function hint() {
+  const h = $("hint");
+  if (!state.start) h.textContent = "Click the map to set Start";
+  else if (!state.auto && !state.beer) h.textContent = "Now click where the Beer Near (cooler) goes";
+  else if (state.mode === "start") h.textContent = "Click to move Start, or drag a marker";
+  else if (state.mode === "beer") h.textContent = "Click to move the Beer Near, or drag a marker";
+  h.style.display = $("replay").style.display === "block" ? "none" : "block";
+}
+const fmt = p => `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}` + (p.moved_m > 15 ? ` (snapped ${Math.round(p.moved_m)} m)` : "");
+
+async function place(which, latlng) {
+  const p = await api(`/api/snap?lat=${latlng.lat}&lon=${latlng.lng}`);
+  state[which] = p;
+  const mk = which === "start" ? "startMk" : "beerMk";
+  const colour = which === "start" ? css("--start") : css("--beer");
+  const label = which === "start" ? "S" : "B";
+  if (!window[mk]) {
+    window[mk] = L.marker([p.lat, p.lon], { icon: icon(colour, label), draggable: true, title: which === "start" ? "Start" : "Beer Near" })
+      .addTo(map).on("dragend", e => place(which, e.target.getLatLng()));
+  } else window[mk].setLatLng([p.lat, p.lon]);
+  $(which === "start" ? "startWhere" : "beerWhere").textContent = fmt(p);
+  if (which === "start" && !state.beer && !state.auto) setMode("beer");
+  await checkEnds();
+}
+
+async function checkEnds() {
+  const n = $("walkNote");
+  n.classList.remove("bad");
+  state.ok = !!state.start && (state.auto || !!state.beer);
+  if (state.start && state.beer && !state.auto) {
+    try {
+      const c = await api(`/api/check?start=${state.start.lat},${state.start.lon}&end=${state.beer.lat},${state.beer.lon}&miles=${$("miles").value}`);
+      if (c.problem) { n.textContent = c.problem; n.classList.add("bad"); state.ok = false; }
+      else n.textContent = `Beer Near is a ${c.walk_mi} mi walk from Start` + ($("returnLeg").checked ? ", so the leg back will be at least that." : ".");
+    } catch (e) { n.textContent = e.message; n.classList.add("bad"); state.ok = false; }
+  } else n.textContent = state.auto ? `Autotrail will pick a Beer Near about ${$("return_miles").value} mi from Start.` : "";
+  $("go").disabled = !state.ok || !!state.job;
+  hint();
+}
+
+function settings() {
+  const s = { return_leg: $("returnLeg").checked };
+  for (const f of FIELDS) s[f] = $(f).value;
+  return s;
+}
+
+function showTab(which) {
+  const res = which === "result";
+  $("tabPick").classList.toggle("on", !res);
+  $("tabResult").classList.toggle("on", res);
+  $("map").style.display = res ? "none" : "block";
+  $("replay").style.display = res ? "block" : "none";
+  if (!res) map.invalidateSize();
+  hint();
+}
+
+async function generate() {
+  if (!state.ok || state.job) return;
+  $("go").disabled = true;
+  $("go").textContent = "Generating…";
+  $("log").style.display = "block";
+  $("log").textContent = "";
+  $("result").style.display = "none";
+  const body = { start: [state.start.lat, state.start.lon], end: state.auto ? null : [state.beer.lat, state.beer.lon], settings: settings() };
+  try {
+    const j = await api("/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    state.job = j.id;
+    poll();
+  } catch (e) { $("log").textContent = e.message; done(); }
+}
+
+async function poll() {
+  try {
+    const j = await api(`/api/jobs/${state.job}`);
+    $("log").textContent = j.log.join("\n") + (j.state === "running" ? `\n… ${j.elapsed_s}s` : "");
+    $("log").scrollTop = 1e9;
+    if (j.state === "done") { showResult(j.result); done(); loadRuns(); return; }
+    if (j.state === "failed") { $("log").textContent += "\n\n" + j.error; done(); return; }
+  } catch (e) { $("log").textContent += "\n" + e.message; }
+  setTimeout(poll, 1000);
+}
+function done() { state.job = null; $("go").textContent = "Generate trail"; checkEnds(); }
+
+function showResult(r) {
+  $("result").style.display = "block";
+  $("rScore").innerHTML = `${Math.round(r.score)} <small>/ 100</small>`;
+  const rows = [["True trail", `${r.true_trail_mi} mi`], ["Leg back", r.return_mi ? `${r.return_mi} mi` : "none"],
+    ["Front runners extra", `+${r.front_extra_mi} mi`], ["Back of pack extra", `+${r.back_extra_mi} mi`]];
+  if (r.seconds) rows.push(["Took", `${Math.round(r.seconds)} s`]);
+  if (r.settings) rows.push(["Seed", r.settings.seed]);
+  $("rStats").innerHTML = rows.map(([k, v]) => `<span>${k}</span><b>${v}</b>`).join("");
+  const f = r.files || {};
+  $("rLinks").innerHTML = [f.map && `<a href="${f.map}" target="_blank">Open replay in a new tab</a>`,
+    f.trail && `<a href="${f.trail}" download>GeoJSON</a>`, f.gpx && `<a href="${f.gpx}" download>GPX</a>`].filter(Boolean).join(" · ");
+  $("rReport").textContent = r.report || "";
+  if (f.map) {
+    $("replay").src = f.map;
+    $("tabResult").disabled = false;
+    showTab("result");
+  }
+}
+
+async function loadRuns() {
+  const runs = await api("/api/runs").catch(() => []);
+  const box = $("runs");
+  if (!runs.length) { box.innerHTML = '<div class="note">None yet.</div>'; return; }
+  box.innerHTML = "";
+  for (const r of runs) {
+    const d = document.createElement("div");
+    d.className = "runrow";
+    const when = r.run.slice(0, 13).replace(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})/, "$2/$3 $4:$5");
+    d.innerHTML = `<span>${when} · ${r.true_trail_mi} mi · seed ${r.settings ? r.settings.seed : "?"}</span><b>${Math.round(r.score)}</b>`;
+    d.onclick = async () => {
+      showResult(r);
+      if (r.start) await place("start", { lat: r.start[0], lng: r.start[1] });
+      if (r.end && !state.auto) await place("beer", { lat: r.end[0], lng: r.end[1] });
+    };
+    box.appendChild(d);
+  }
+}
+
+async function init() {
+  const info = await api("/api/info");
+  $("area").textContent = info.area;
+  for (const f of FIELDS) $(f).value = info.defaults[f];
+  $("returnLeg").checked = info.defaults.return_leg;
+  map = L.map("map", { zoomControl: true });
+  const streets = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    { maxZoom: 19, attribution: "Tiles &copy; Esri" }).addTo(map);
+  const sat = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    { maxZoom: 19, attribution: "Tiles &copy; Esri" });
+  L.control.layers({ "Streets (Esri)": streets, "Satellite (Esri)": sat }).addTo(map);
+  map.fitBounds(info.bounds);
+  L.rectangle(info.bounds, { color: "#888", weight: 1, fill: false, dashArray: "4 4", interactive: false }).addTo(map);
+  map.on("click", e => {
+    const which = state.auto ? "start" : state.mode;
+    place(which, e.latlng).catch(err => { $("walkNote").textContent = err.message; });
+  });
+  $("pinStart").onclick = () => setMode("start");
+  $("pinBeer").onclick = () => { if (!state.auto) setMode("beer"); };
+  $("autoBeer").onchange = e => {
+    state.auto = e.target.checked;
+    $("pinBeer").disabled = state.auto;
+    $("returnMilesRow").style.display = state.auto ? "flex" : "none";
+    if (state.auto) { setMode("start"); if (window.beerMk) window.beerMk.setOpacity(0.35); }
+    else if (window.beerMk) window.beerMk.setOpacity(1);
+    checkEnds();
+  };
+  $("miles").onchange = checkEnds;
+  $("return_miles").onchange = checkEnds;
+  $("returnLeg").onchange = checkEnds;
+  $("dice").onclick = () => { $("seed").value = Math.floor(Math.random() * 10000); };
+  $("again").onclick = () => { $("seed").value = (+$("seed").value || 0) + 1; generate(); };
+  $("go").onclick = generate;
+  $("tabPick").onclick = () => showTab("pick");
+  $("tabResult").onclick = () => { if (!$("tabResult").disabled) showTab("result"); };
+  hint();
+  loadRuns();
+}
+init().catch(e => { $("area").textContent = "Couldn't reach the Autotrail server: " + e.message; });
+</script>
+</body>
+</html>

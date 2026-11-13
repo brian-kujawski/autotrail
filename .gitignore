@@ -5,3 +5,4 @@ __pycache__/
 data/
 examples/*.html
 *.html
+!src/autotrail/gui/*.html

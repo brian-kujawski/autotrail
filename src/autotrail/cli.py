@@ -1,4 +1,4 @@
-"""Command line: ``autotrail areas|download|show|generate|sim``.
+"""Command line: ``autotrail areas|download|show|generate|sim|gui``.
 
 Phase 2 adds ``autotrail ask``.
 """
@@ -144,9 +144,9 @@ def _report(trail, g, results, card, out: Path, tiles: str, open_browser: bool, 
 @app.command()
 def generate(
     start: str = typer.Option(..., "--start", help="Start as 'lat,lon' (snapped to the nearest intersection)."),
-    end: Optional[str] = typer.Option(None, "--end", help="Beer Near as 'lat,lon'. Default: picked about --return-miles from Start."),
+    end: Optional[str] = typer.Option(None, "--end", help="Beer Near as 'lat,lon' (where the cooler goes). Default: picked about --return-miles from Start."),
     miles: float = typer.Option(5.0, "--miles", help="True trail length, Start to Beer Near."),
-    return_miles: float = typer.Option(1.0, "--return-miles", help="Hared leg back to Start. 0 for none."),
+    return_miles: float = typer.Option(1.0, "--return-miles", help="Hared leg back to Start; with --end it is sized from the real walk instead. 0 for none."),
     out: Path = typer.Option(Path("trail.geojson"), "--out", "-o", help="Where to save the trail."),
     map_out: Optional[Path] = typer.Option(None, "--map", help="HTML map + replay (default: <out>.html)."),
     gpx: Optional[Path] = typer.Option(None, "--gpx", help="Also export the route as GPX."),
@@ -162,33 +162,25 @@ def generate(
     verbose: bool = typer.Option(False, "--verbose/--quiet"),
 ) -> None:
     """One-click trail: route, marks (blobs, checks, falses), scored by simulating the pack."""
-    from .generate import GenerateOptions, generate as gen
-    from .score import score_results
-    from .sim import simulate_many
+    from .pipeline import RunSettings, run
 
     _setup_logging(verbose)
     g = load_area_graph(get_area(area, areas_file))
-    s_node = g.nearest_node(*_latlon(start))
-    e_node = g.nearest_node(*_latlon(end)) if end else None
-    pack = _pack(runners, fastest, slowest)
-    opts = GenerateOptions(miles=miles, return_miles=return_miles if return_miles > 0 else 0.0, tries=tries)
-    if return_miles <= 0 and e_node is None:
-        raise typer.BadParameter("with --return-miles 0, give --end")
-    hare = _hare(hare_pace, head_start)
-    res = gen(g, s_node, e_node, opts, pack=pack, hare=hare, seed=seed, progress=typer.echo)
-    trail = res.trail
-    if return_miles <= 0:
-        trail.return_path = []
-        trail.marks = [m for m in trail.marks if m.params.get("leg") != "return"]
-    trail.meta.update({"name": f"Autotrail {miles:g} mi (seed {seed})"})
-    results = simulate_many(trail, g, pack, runs=runs, seed=seed)
-    card = score_results(results, miles * METRES_PER_MILE, hare=hare)
-    trail.save(out, g)
-    typer.echo(f"Trail: {out}\n")
+    settings = RunSettings(miles=miles, return_leg=return_miles > 0, return_miles=max(return_miles, 0.0),
+                           seed=seed, tries=tries, runs=runs, runners=runners, fastest=fastest,
+                           slowest=slowest, hare_pace=hare_pace, head_start_min=head_start)
+    try:
+        res = run(g, _latlon(start), _latlon(end) if end else None, settings, out=out, map_out=map_out,
+                  gpx=gpx, tiles=tiles, progress=typer.echo)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+    typer.echo(f"Trail: {res.files['trail']}\n")
     if gpx:
-        gpx.write_text(trail.to_gpx(g), encoding="utf-8")
         typer.echo(f"GPX: {gpx}")
-    _report(trail, g, results, card, map_out or out.with_suffix(".html"), tiles, open_browser, hare)
+    typer.echo(res.report)
+    typer.echo(f"\nMap with pack replay: {res.files['map']}")
+    if open_browser:
+        webbrowser.open(res.files["map"].resolve().as_uri())
 
 
 @app.command()
@@ -233,6 +225,39 @@ def sim(
     hare = _hare(hare_pace, head_start)
     card = score_results(results, target * METRES_PER_MILE, hare=hare)
     _report(trail, g, results, card, out or trail_file.with_suffix(".sim.html"), tiles, open_browser, hare)
+
+
+@app.command()
+def gui(
+    port: int = typer.Option(8765, "--port", help="Port for the local web page."),
+    host: str = typer.Option("127.0.0.1", "--host", help="Address to listen on (127.0.0.1 = this PC only)."),
+    runs_dir: Optional[Path] = typer.Option(None, "--runs-dir", help="Where runs are saved (default: <data>/gui_runs)."),
+    area: Optional[str] = AreaOpt,
+    areas_file: Optional[Path] = AreasFileOpt,
+    tiles: str = typer.Option("streets", "--tiles", help="Basemap for the replay: streets, satellite, or osm."),
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the page in a browser."),
+    verbose: bool = typer.Option(False, "--verbose/--quiet"),
+) -> None:
+    """Web GUI: click Start and Beer Near on a map, generate a trail, watch the replay."""
+    from .config import data_dir
+    from .gui.server import GuiApp, serve
+
+    _setup_logging(verbose)
+    a = get_area(area, areas_file)
+    typer.echo(f"Loading the {a.name} map (once; every trail after this skips it)...")
+    g = load_area_graph(a)
+    app_ = GuiApp(g, a.name, runs_dir or data_dir() / "gui_runs", tiles=tiles)
+    srv = serve(app_, host, port)
+    url = f"http://{'localhost' if host in ('127.0.0.1', '0.0.0.0') else host}:{srv.server_address[1]}/"
+    typer.echo(f"Autotrail GUI at {url}  (Ctrl+C to stop)")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        typer.echo("Stopped.")
+    finally:
+        srv.server_close()
 
 
 if __name__ == "__main__":
