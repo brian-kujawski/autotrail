@@ -84,6 +84,7 @@ class GenerateOptions:
 
 RUN_STEP_M = 25.0  # route search tracks the straight run so far in steps of this
 RETURN_STRAIGHT_M = 400.0  # the leg back to Start is nudged off straights longer than this
+END_ZONE_M = 70.0          # near Start and the Beer Near, trail may touch the way back (the hare's in view)
 MAX_LEN_SHARE = 1.25       # a trail may be at most this times the target (distance fit is 0 there)
 WALK_DETOUR = 1.5          # a waypoint's walk from Start may be this many times the crow-flies distance...
 WALK_SLACK_M = 200.0       # ...plus this (a grid is up to 1.41x; more means a river or freeway in the way)
@@ -333,6 +334,14 @@ def _tail_run(g: StreetGraph, geo: Geometry, edges: list[tuple]) -> float:
     return run
 
 
+def reserved_corners(geo: Geometry, reserved: list[tuple], start, end, zone_m: float) -> set:
+    """Corners on the way back that the trail may not use: all of them except those within
+    ``zone_m`` of Start or the Beer Near (trail may run in on the same street there)."""
+    pts = [geo.node_xy(start), geo.node_xy(end)]
+    return {n for e in reserved for n in e[:2]
+            if all(math.hypot(geo.node_xy(n)[0] - x, geo.node_xy(n)[1] - y) > zone_m for x, y in pts)}
+
+
 def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: random.Random,
                radius_m: float, keep_apart_m: float = 25.0, noise: float = 0.25,
                turn_cost_m: float = 8.0, timing: PackTiming | None = None, sight_cost: float = 0.0,
@@ -359,7 +368,7 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
     tr.update(waypoints=[], edges=[], reason=None)
     sx, sy = geo.node_xy(start)
     ex, ey = geo.node_xy(end)
-    reserved_nodes = {n for e in reserved for n in e[:2]} - {start, end}
+    reserved_nodes = reserved_corners(geo, reserved, start, end, END_ZONE_M)
     base = math.atan2(ey - sy, ex - sx) if end != start else rng.uniform(0, 2 * math.pi)
     side = rng.choice((-1.0, 1.0))
     n_wp = rng.choice(waypoints)
@@ -414,8 +423,9 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
     fp = Footprint(geo, keep_apart_m)
     if reserved:
         fp.add_path(reserved, "return")
-        # Trail leaves Start and reaches the Beer Near right next to the way back.
-        fp.zones += [(sx, sy, 2 * keep_apart_m), (ex, ey, 2 * keep_apart_m)]
+        # Trail leaves Start and reaches the Beer Near right next to the way back: that close,
+        # the pack can see the hare waiting anyway, so the game is over.
+        fp.zones += [(sx, sy, END_ZONE_M), (ex, ey, END_ZONE_M)]
     sight = SightField(geo, timing) if (timing is not None and sight_cost) else None
     edges: list[tuple] = []
     visited = {start} | reserved_nodes

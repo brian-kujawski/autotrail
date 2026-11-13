@@ -118,3 +118,19 @@ def test_waypoints_stay_on_the_walkable_side_of_a_river():
     assert gen.trail.true_path
     north = (river + 1) * n  # node ids above this are north of the river
     assert all(w > north for r in seen for w in r["waypoints"])  # nothing picked across the water
+
+
+def test_trail_may_use_the_way_back_near_the_beer_near(grid):
+    """The corner next to the Beer Near is on the way back, but trail may still run in through it."""
+    from autotrail.generate import reserved_corners
+    from autotrail.graph import StreetGraph
+    from conftest import grid_id
+
+    g = StreetGraph(grid, area_key="grid")
+    geo = Geometry(g)
+    end, corner, far = grid_id(2, 2), grid_id(2, 1), grid_id(2, 0)
+    back = [(end, corner, 0), (corner, far, 0), (far, grid_id(1, 0), 0)]
+    start = grid_id(1, 0)
+    assert reserved_corners(geo, back, start, end, 70.0) == {corner, far}
+    # 100 m zone: the corner 100 m from the Beer Near is free to use too
+    assert corner not in reserved_corners(geo, back, start, end, 101.0)
