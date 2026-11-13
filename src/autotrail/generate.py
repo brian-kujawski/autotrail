@@ -41,7 +41,7 @@ import numpy as np
 
 from .graph import StreetGraph
 from .pack import HareProfile, HoundProfile, default_pack
-from .rules import COVER_M, STRAIGHT_DEG, Footprint, Geometry, is_sidewalk, jog_corners, turns_per_mile
+from .rules import CORRIDOR_M, COVER_M, STRAIGHT_DEG, Footprint, Geometry, is_sidewalk, jog_corners, turns_per_mile
 from .score import DistanceFit, ScoreCard, score_results
 from .sight import PackTiming, SightField, SightLines, check_looks_at_hare
 from .sim import SimResult, TrailModel, simulate_many
@@ -187,17 +187,21 @@ class Network:
         def bucket(r):
             return min(int(r // RUN_STEP_M), nb) if nb else 0
 
-        s0 = (a, came_from, bucket(run0))
+        s0 = (a, came_from, bucket(run0), False)
         cost = {s0: 0.0}
         real = {s0: 0.0}
         run = {s0: run0}
+        # The run's direction, and a pending hop: a short stub off the axis (crossing to the other
+        # side of a boulevard) that doesn't end the straightaway if the next street carries on.
+        axis = {s0: geo.heading_in(came_from, a) if came_from is not None else None}
+        stub = {s0: 0.0}
         back = {}
         pq = [(h(a), 0.0, s0)]
         expanded = 0
         goal = None
         while pq:
             _, d, st = heapq.heappop(pq)
-            u, p, _ = st
+            u, p = st[0], st[1]
             if u == b:
                 goal = st
                 break
@@ -222,14 +226,27 @@ class Network:
                 nd = d + c * f
                 if turn_cost_m and p is not None and v != straight and len(self.adj.get(u, ())) > 2:
                     nd += turn_cost_m
-                rn = l
+                rn, ax, sb = l, None, 0.0
                 if straight_cost:
                     # A straightaway is what the pack sees, not what the marks say: any way on within
                     # STRAIGHT_DEG of the way in keeps the run going (a crossing with a parallel
-                    # sidewalk or median has no single "straight on", but the street is still straight).
-                    rn = run[st] + l if (p is None or geo.deviation(p, u, v) <= STRAIGHT_DEG) else l
-                    nd += straight_cost * (max(0.0, rn - straight_run_m) - max(0.0, rn - l - straight_run_m))
-                nst = (v, u, bucket(rn))
+                    # sidewalk or median has no single "straight on", but the street is still straight),
+                    # and so does a hop across to the other side of the street (a stub under
+                    # CORRIDOR_M, then on the same way): otherwise hopping across a boulevard
+                    # would look like breaking up the straight.
+                    ax0, sb0, run0_ = axis[st], stub[st], run[st]
+                    eh = geo.heading_out(u, v)
+                    on_axis = ax0 is not None and _angle(eh, ax0) <= STRAIGHT_DEG
+                    if p is None or (not sb0 and geo.deviation(p, u, v) <= STRAIGHT_DEG):
+                        rn, ax, prev = run0_ + l, ax0 if ax0 is not None else eh, run0_
+                    elif sb0 and on_axis:
+                        rn, ax, prev = run0_ + sb0 + l, ax0, run0_
+                    elif not sb0 and ax0 is not None and l < CORRIDOR_M:
+                        rn, ax, sb, prev = run0_, ax0, l, run0_
+                    else:
+                        rn, ax, prev = l, geo.heading_in(u, v), 0.0
+                    nd += straight_cost * (max(0.0, rn - straight_run_m) - max(0.0, prev - straight_run_m))
+                nst = (v, u, bucket(rn), sb > 0)
                 if nd >= cost.get(nst, math.inf):
                     continue
                 if fp.clashes((u, v, k), tag, pos0 + ru):
@@ -241,6 +258,8 @@ class Network:
                 cost[nst] = nd
                 real[nst] = rl
                 run[nst] = rn
+                axis[nst] = ax
+                stub[nst] = sb
                 back[nst] = (st, k)
                 heapq.heappush(pq, (nd + h(v), nd, nst))
         if goal is None:
@@ -318,6 +337,11 @@ def _hw(d: dict) -> str:
 
 def _und(e) -> tuple:
     return (e[0], e[1]) if str(e[0]) <= str(e[1]) else (e[1], e[0])
+
+
+def _angle(a: float, b: float) -> float:
+    """Degrees between two headings (0 to 180)."""
+    return abs(math.degrees((a - b + math.pi) % (2 * math.pi) - math.pi))
 
 
 def path_len(g: StreetGraph, edges) -> float:

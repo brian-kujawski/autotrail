@@ -95,3 +95,83 @@ def test_route_search_breaks_up_straights(grid):
     cum = lambda p: np.concatenate([[0.0], np.cumsum([g.edge_length(*e) for e in p])])  # noqa: E731
     assert turns_per_mile(geo, twisty, cum(twisty)) > turns_per_mile(geo, plain, cum(plain))
     assert max(b - a for a, b in straight_runs(geo, twisty, cum(twisty))) <= 200.0
+
+
+def _boulevard():
+    """A boulevard whose two sidewalks run east-west 40 m apart (y=0 and y=40), mapped separately,
+    joined every 100 m by a crossing street; plus a residential street parallel 120 m north."""
+    import math
+
+    import networkx as nx
+
+    from autotrail.graph import annotate
+    from conftest import ll
+
+    G = nx.MultiDiGraph(crs="epsg:4326")
+    pos = {}
+    for i in range(6):
+        pos[("s", i)] = (i * 100.0, 0.0)
+        pos[("n", i)] = (i * 100.0, 40.0)
+        pos[("r", i)] = (i * 100.0, 160.0)
+    ids = {k: n for n, k in enumerate(pos, start=1)}
+    for k, (x, y) in pos.items():
+        lon, lat = ll(x, y)
+        G.add_node(ids[k], x=lon, y=lat, street_count=0)
+
+    def link(a, b, **tags):
+        (xa, ya), (xb, yb) = pos[a], pos[b]
+        for u, v in ((a, b), (b, a)):
+            G.add_edge(ids[u], ids[v], length=math.hypot(xa - xb, ya - yb), oneway=False, reversed=u != a,
+                       osmid=ids[a], **tags)
+
+    for i in range(5):
+        link(("s", i), ("s", i + 1), highway="footway", footway="sidewalk")
+        link(("n", i), ("n", i + 1), highway="footway", footway="sidewalk")
+        link(("r", i), ("r", i + 1), highway="residential", name="Elm")
+    for i in range(6):
+        link(("s", i), ("n", i), highway="residential", name=f"Cross {i}")
+        link(("n", i), ("r", i), highway="residential", name=f"Cross {i}")
+    annotate(G)
+    return StreetGraph(G, area_key="blvd"), ids
+
+
+def test_hopping_across_a_boulevard_is_a_jog_not_two_turns():
+    import numpy as np
+
+    from autotrail.rules import jog_corners, straight_runs, turns_per_mile
+
+    g, ids = _boulevard()
+    geo = Geometry(g)
+    # North sidewalk east 200 m, hop across (40 m), carry on east along the south sidewalk.
+    nodes = [ids[("n", 0)], ids[("n", 1)], ids[("n", 2)], ids[("s", 2)], ids[("s", 3)], ids[("s", 4)]]
+    edges = [(a, b, 0) for a, b in zip(nodes, nodes[1:])]
+    cum = np.concatenate([[0.0], np.cumsum([g.edge_length(*e) for e in edges])])
+    assert jog_corners(geo, edges, cum) == {2, 3}
+    assert turns_per_mile(geo, edges, cum) == 0.0
+    assert len(straight_runs(geo, edges, cum)) == 1  # still one straightaway
+
+
+def test_a_real_offset_over_20m_is_still_two_turns():
+    import numpy as np
+
+    from autotrail.rules import turns_per_mile
+
+    g, ids = _boulevard()
+    geo = Geometry(g)
+    # Elm east, 120 m down Cross 2, then east on the north sidewalk: a real offset, two turns.
+    nodes = [ids[("r", 0)], ids[("r", 1)], ids[("r", 2)], ids[("n", 2)], ids[("n", 3)]]
+    edges = [(a, b, 0) for a, b in zip(nodes, nodes[1:])]
+    cum = np.concatenate([[0.0], np.cumsum([g.edge_length(*e) for e in edges])])
+    assert turns_per_mile(geo, edges, cum) > 0
+
+
+def test_running_back_down_the_other_side_clashes():
+    g, ids = _boulevard()
+    geo = Geometry(g)
+    fp = Footprint(geo, 35.0)
+    out = [(ids[("n", i)], ids[("n", i + 1)], 0) for i in range(4)]  # north side, eastbound
+    fp.add_path(out, "true")
+    # Much later, westbound on the south side, 40 m away: the same street.
+    assert fp.clashes((ids[("s", 2)], ids[("s", 1)], 0), "true", 2000.0)
+    # Elm, 120 m north and parallel, is a different street.
+    assert not fp.clashes((ids[("r", 2)], ids[("r", 1)], 0), "true", 2000.0)
