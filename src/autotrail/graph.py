@@ -368,6 +368,40 @@ class StreetGraph:
         offset = along / line.length * self.edge_length(*e) if line.length else 0.0
         return e, offset, float(line.distance(p))
 
+    def snap_to_street(self, lon: float, lat: float) -> dict:
+        """The nearest point on any street or path to a click, without changing the graph."""
+        (u, v, k), offset, dist = self.nearest_edge(lon, lat)
+        plon, plat = self.point_on_edge(u, v, k, offset)
+        d = self.G.edges[u, v, k]
+        name = d.get("name")
+        if isinstance(name, list):
+            name = " / ".join(str(x) for x in name)
+        return {"edge": (u, v, k), "offset_m": offset, "lon": plon, "lat": plat, "moved_m": dist,
+                "name": name if isinstance(name, str) and name else None, "highway": str(d.get("highway", ""))}
+
+    def node_at(self, lon: float, lat: float, end_tolerance_m: float = 3.0) -> int:
+        """A node exactly where the user clicked: the nearest point on the nearest street.
+
+        Within ``end_tolerance_m`` of an existing node, that node. Otherwise the street (and
+        its reverse twin) is split there, in memory only, and the new node is returned.
+        """
+        (u, v, k), offset, _ = self.nearest_edge(lon, lat)
+        length = self.edge_length(u, v, k)
+        if offset <= end_tolerance_m:
+            return u
+        if offset >= length - end_tolerance_m:
+            return v
+        line_m = self.edge_line_m(u, v, k)
+        d_m = offset / length * line_m.length if length else 0.0
+        new_id = min(0, min(self.G.nodes)) - 1
+        _split_edge(self.G, u, v, k, d_m, self._fwd, self._inv, new_id)
+        self.G.nodes[new_id]["virtual"] = False
+        self.G.nodes[new_id]["picked"] = True
+        _refresh_degrees(self.G, {new_id, u, v})
+        self._node_ids = self._node_xy = None  # spatial caches are stale now
+        self._edge_tree = None
+        return new_id
+
     def point_on_edge(self, u, v, k, offset_m: float) -> tuple[float, float]:
         length = self.edge_length(u, v, k)
         frac = 0.0 if length <= 0 else min(max(offset_m / length, 0.0), 1.0)

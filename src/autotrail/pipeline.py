@@ -89,6 +89,32 @@ def check_ends(g: StreetGraph, start, end, miles: float) -> tuple[float, Optiona
     return d, None
 
 
+def preview_walk_mi(g: StreetGraph, start: LonLat, end: LonLat, miles: float) -> tuple[float, Optional[str]]:
+    """Like :func:`check_ends` for two clicks, without changing the graph (to within a block end)."""
+    a, b = g.snap_to_street(*start), g.snap_to_street(*end)
+    ax, ay = g.to_metres(a["lon"], a["lat"])
+    bx, by = g.to_metres(b["lon"], b["lat"])
+    if math.hypot(ax - bx, ay - by) < 15.0:
+        return 0.0, "Start and Beer Near are on the same spot. Put the Beer Near somewhere else."
+
+    def ends(p):  # (node, metres from the click) for both ends of its street
+        u, v, k = p["edge"]
+        return [(u, p["offset_m"]), (v, g.edge_length(u, v, k) - p["offset_m"])]
+
+    if set(a["edge"][:2]) == set(b["edge"][:2]):  # same block
+        d = abs(a["offset_m"] - (b["offset_m"] if a["edge"][0] == b["edge"][0]
+                                 else g.edge_length(*b["edge"]) - b["offset_m"]))
+    else:
+        d = min(da + walk_m(g, na, nb) + db for na, da in ends(a) for nb, db in ends(b))
+    d /= METRES_PER_MILE
+    if math.isinf(d):
+        return d, "The Beer Near can't be reached on foot from Start on this map."
+    if d > 0.8 * miles:
+        return d, (f"The Beer Near is a {d:.1f} mi walk from Start, too far for a {miles:g} mi trail "
+                   f"(it needs to be under {0.8 * miles:.1f} mi). Move it closer or make the trail longer.")
+    return d, None
+
+
 def run(g: StreetGraph, start: LonLat, end: Optional[LonLat], s: RunSettings, *,
         out: Path, map_out: Optional[Path] = None, gpx: Optional[Path] = None,
         tiles: str = "streets", progress: Callable[[str], None] | None = None) -> RunResult:
@@ -99,8 +125,9 @@ def run(g: StreetGraph, start: LonLat, end: Optional[LonLat], s: RunSettings, *,
     from .viz import save_replay_map
 
     say = progress or (lambda msg: None)
-    s_node = g.nearest_node(*start)
-    e_node = g.nearest_node(*end) if end is not None else None
+    # Ends go exactly where they were clicked: the nearest point on the nearest street.
+    s_node = g.node_at(*start)
+    e_node = g.node_at(*end) if end is not None else None
     if e_node is None and not s.return_leg:
         raise ValueError("Without a leg back to Start, pick a Beer Near.")
 
@@ -115,7 +142,7 @@ def run(g: StreetGraph, start: LonLat, end: Optional[LonLat], s: RunSettings, *,
         back_mi = max(walk_back, 0.25)
 
     pack, hare = s.pack(), s.hare()
-    opts = GenerateOptions(miles=s.miles, return_miles=back_mi, tries=s.tries)
+    opts = GenerateOptions(miles=s.miles, return_miles=back_mi, tries=s.tries, exact_ends=True)
     res = generate(g, s_node, e_node, opts, pack=pack, hare=hare, seed=s.seed, progress=say)
     trail = res.trail
     if not s.return_leg:
