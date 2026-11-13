@@ -41,15 +41,6 @@ def test_dead_end_and_safe_ways(grid):
     assert _way(facts, grid_id(2, 2), grid_id(2, 3)).kind == "open"
 
 
-def test_trail_into_the_way_back_is_its_own_kind(grid):
-    g, tp = _u_trail(grid)
-    # A way back from the Beer Near (0,2) down column 0... is the way trail came out: use row 3 instead.
-    ret = _path(g, [grid_id(0, 2), grid_id(0, 3), grid_id(1, 3), grid_id(2, 3), grid_id(2, 4)])
-    facts = corner_facts(g, tp, ret)
-    w = _way(facts, grid_id(2, 2), grid_id(2, 3))  # now lands on the way back
-    assert w.kind == "way_back" and w.meets_s > 800.0
-
-
 def test_summary_counts(grid):
     g, tp = _u_trail(grid)
     facts = corner_facts(g, tp)

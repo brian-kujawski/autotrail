@@ -953,7 +953,7 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
                 tpm = turns_per_mile(geo, r, _cum(g, r))
                 info.update(length_m=length, turns_per_mile=tpm, fit=fit)
                 # Corner facts are worth working out only when someone looks (step-through mode).
-                info["facts"] = (lambda r=r, ret=ret: corner_facts(g, r, ret, timing, geo))
+                info["facts"] = (lambda r=r: corner_facts(g, r, timing, geo))
                 if fit <= 0:
                     info["reason"] = f"{length / METRES_PER_MILE:.2f} mi: too far off {o.miles:g} mi"
                 else:

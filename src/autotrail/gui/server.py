@@ -258,7 +258,6 @@ class GuiApp:
                 if w.kind == "busy":
                     continue
                 note = {"shortcut": "shortcut: {walk:.0f} m on foot skips {skip:.0f} m of trail",
-                        "way_back": "shortcut to the way back: {walk:.0f} m on foot",
                         "rejoins": "meets trail after {walk:.0f} m but saves little",
                         "dead_end": "dead end (everything down it is within 250 m)",
                         "open": "no trail within 250 m: a safe wrong way",

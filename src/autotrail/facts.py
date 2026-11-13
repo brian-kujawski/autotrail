@@ -10,8 +10,6 @@ For each wrong way:
 * **shortcut**: within ``PROBE_M`` on foot it reaches trail still to come
   (or the way back) and skips at least ``SKIP_RATIO`` times the distance
   walked. A check here invites the pack to lop off trail.
-* **way_back**: a shortcut whose far end is the way back from the Beer Near
-  (common near Start, where trail leaves right beside it).
 * **rejoins**: it reaches trail, but saves nothing much (or it's trail
   already run).
 * **dead_end**: everything down it stays within ``PROBE_M``: a cul-de-sac or
@@ -47,7 +45,7 @@ SAMPLE_M = 8.0        # trail is sampled this often for the "near trail" test
 STUB_M = 80.0         # how much of a plain wrong way to draw
 BUSY = {"motorway", "motorway_link", "trunk", "trunk_link"}
 
-KINDS = ("shortcut", "way_back", "rejoins", "dead_end", "open", "back", "busy")
+KINDS = ("shortcut", "rejoins", "dead_end", "open", "back", "busy")
 
 
 @dataclass
@@ -56,7 +54,7 @@ class WayFact:
     kind: str                   # one of KINDS
     walk_m: float | None = None   # on foot from the corner to where it meets trail
     skip_m: float | None = None   # trail it skips (metres along trail between the corner and that point)
-    meets_s: float | None = None  # where it meets trail (metres along; past the Beer Near = the way back)
+    meets_s: float | None = None  # where it meets trail (metres along)
     path: list = field(default_factory=list)  # nodes from the corner: to the meeting point, or a short stub
     sees_hare: bool = False
 
@@ -75,7 +73,7 @@ class CornerFact:
 
     @property
     def shortcut(self) -> bool:
-        return any(w.kind in ("shortcut", "way_back") for w in self.ways)
+        return any(w.kind == "shortcut" for w in self.ways)
 
     @property
     def sees_hare(self) -> bool:
@@ -204,7 +202,7 @@ def _back(geo: Geometry, prev, node, nb) -> bool:
     return abs(math.degrees((b - a + math.pi) % (2 * math.pi) - math.pi)) <= PARALLEL_DEG
 
 
-def corner_facts(g: StreetGraph, true_path: list[tuple], return_path: list[tuple] = (),
+def corner_facts(g: StreetGraph, true_path: list[tuple],
                  timing: PackTiming | None = None, geo: Geometry | None = None) -> list[CornerFact]:
     """Facts for every corner on ``true_path`` (edges (u, v, key)), read with the whole route known."""
     from .generate import (  # generate imports this module's users; avoid a cycle
@@ -215,10 +213,11 @@ def corner_facts(g: StreetGraph, true_path: list[tuple], return_path: list[tuple
 
     geo = geo or Geometry(g)
     tp = [tuple(e) for e in true_path]
-    rp = [tuple(e) for e in return_path]
     cum = _cum(g, tp)
     L = float(cum[-1])
-    idx = _TrailIndex(geo, [(tp, 0.0)] + ([(rp, L)] if rp else []))
+    # Only trail to the Beer Near: the way back isn't marked until the pack is in (the hare
+    # slips out a few minutes early to lay it), so there's nothing on it to find.
+    idx = _TrailIndex(geo, [(tp, 0.0)])
 
     looks = None
     if timing is not None:
@@ -251,7 +250,7 @@ def corner_facts(g: StreetGraph, true_path: list[tuple], return_path: list[tuple
             cut, join, escaped, prev = _walk(g, geo, idx, c.node, nb, c.s, d0)
             if cut is not None:
                 _, skip, walk, t, n = cut
-                w = WayFact(nb, "way_back" if t > L else "shortcut", walk, skip, t, _path_to(prev, n))
+                w = WayFact(nb, "shortcut", walk, skip, t, _path_to(prev, n))
             elif join is not None:
                 _, skip, walk, t, n = join
                 w = WayFact(nb, "rejoins", walk, skip, t, _path_to(prev, n))

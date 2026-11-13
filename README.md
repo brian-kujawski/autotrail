@@ -138,7 +138,8 @@ Both the generator and the simulated hounds follow these (`autotrail.rules`):
   the hare nothing. Most turns without a check get a whichy-way; arrows are used sparingly.
 * **Know where every wrong way leads** (`autotrail.facts`). With the whole route known, each
   way off trail at each corner is walked out up to 250 m on foot (any path type but freeways
-  and trunk roads). It's a **shortcut** if it meets trail still to come, or the way back, and
+  and trunk roads). It's a **shortcut** if it meets trail still to come (not the way back: that's marked only
+  after the pack is in) and
   skips at least 3x what it cost (and 100 m or more); otherwise it meets trail but saves
   little, is a dead end, or is safe. Each corner also notes whether checkers would see the
   hare. Step-through mode draws these on every kept route. Mark placement doesn't use them
