@@ -198,6 +198,17 @@ def straight_runs(geo: Geometry, edges: list[tuple], cum) -> list[tuple[float, f
     return out
 
 
+def turns_per_mile(geo: Geometry, edges: list[tuple], cum) -> float:
+    """How twisty a path is: real turns (not jogs) per mile of path."""
+    L = float(cum[len(edges)]) if edges else 0.0
+    if L <= 0:
+        return 0.0
+    jogs = jog_corners(geo, edges, cum)
+    n = sum(1 for i in range(1, len(edges)) if i not in jogs
+            and geo.deviation(edges[i - 1][0], edges[i][0], edges[i][1]) > STRAIGHT_DEG)
+    return n / (L / 1609.344)
+
+
 def turn_angle(geo: Geometry, prev, node, nxt) -> float:
     """Absolute turn in radians going prev -> node -> nxt (0 = straight on)."""
     return math.radians(geo.deviation(prev, node, nxt))

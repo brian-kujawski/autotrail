@@ -122,8 +122,12 @@ Both the generator and the simulated hounds follow these (`autotrail.rules`):
 * **Trail never crosses or comes near itself**, the leg back to Start included: no point is
   within 35 m of trail laid earlier. That also rules out doubling back and running back down
   the other side of a street, where hounds could cut across or see the hare.
-* **No long straightaways.** The route search charges extra for every metre of a straight past
-  a quarter mile: a dead straight mile just lets the front runners pull away.
+* **Twisty, not rectangles.** Turns slow the pack far more than the hare (a mark takes the hare
+  about 3 s), so the route search charges a turn only that (~8 m), and charges 3x extra for
+  every metre of a straight past 150 m (400 m on the shorter, simpler leg back to Start). The
+  loop's waypoints alternate far out and close in, so the route has distance to spare for
+  twists, and routes are shortlisted (and scored, `twistiness`) on turns per mile as well as
+  distance. On a 100 m test grid that's ~15 turns per mile with straights of a block or two.
 * **Keep hounds honest.** Most checks are at turns, but some checks and whichy-ways have
   straight on as the answer: any quarter mile with no check or whichy-way may get one at a
   crossing, and now and then a run of short blocks gets a whichy-way at every crossing

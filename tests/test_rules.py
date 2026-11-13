@@ -58,3 +58,40 @@ def test_turning_a_corner_is_not_coming_near_yourself(grid):
     path = [(grid_id(1, 1), grid_id(2, 1), 0), (grid_id(2, 1), grid_id(2, 2), 0)]
     assert not Footprint(geo, 45.0).path_clashes(path, "true")
     assert Footprint(geo, 45.0).path_clashes(path, "true", recent_m=50.0)  # the old, too-short exemption
+
+
+def test_turns_per_mile(grid):
+    import numpy as np
+    from autotrail.rules import turns_per_mile
+
+    g = StreetGraph(grid, area_key="grid")
+    geo = Geometry(g)
+
+    def path(nodes):
+        edges = [(a, b, 0) for a, b in zip(nodes, nodes[1:])]
+        return edges, np.concatenate([[0.0], np.cumsum([g.edge_length(*e) for e in edges])])
+
+    straight = path([grid_id(c, 1) for c in range(5)])
+    stairs = path([grid_id(0, 0), grid_id(1, 0), grid_id(1, 1), grid_id(2, 1), grid_id(2, 2), grid_id(3, 2)])
+    assert turns_per_mile(geo, *straight) == 0.0
+    # 4 turns in 500 m
+    assert abs(turns_per_mile(geo, *stairs) - 4 / (500 / 1609.344)) < 0.1
+
+
+def test_route_search_breaks_up_straights(grid):
+    """With the straight-run penalty, A* zigzags instead of running a whole street."""
+    from autotrail.generate import Network
+    import numpy as np
+
+    from autotrail.rules import straight_runs, turns_per_mile
+
+    g = StreetGraph(grid, area_key="grid")
+    geo = Geometry(g)
+    net = Network(g, grid_id(0, 0), 2000.0)
+    a, b = grid_id(0, 0), grid_id(4, 4)
+    fp = Footprint(geo, 35.0)
+    plain = net.clear_path(a, b, fp, "true", 0.0, set(), turn_cost_m=120.0)
+    twisty = net.clear_path(a, b, fp, "true", 0.0, set(), turn_cost_m=8.0, straight_run_m=150.0, straight_cost=3.0)
+    cum = lambda p: np.concatenate([[0.0], np.cumsum([g.edge_length(*e) for e in p])])  # noqa: E731
+    assert turns_per_mile(geo, twisty, cum(twisty)) > turns_per_mile(geo, plain, cum(plain))
+    assert max(b - a for a, b in straight_runs(geo, twisty, cum(twisty))) <= 200.0

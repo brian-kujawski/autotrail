@@ -1,10 +1,12 @@
 """One-click trails: a route search, then mark placement, following real hash rules.
 
-Stage 1 (route): a random-restart weighted walk from Start that bends toward
-the Beer Near as its distance budget runs down. It never revisits a corner and
-never comes within ``keep_apart_m`` of trail it laid earlier (no crossing, no
-running back down the other sidewalk). It closes with a shortest path that
-obeys the same rule. The leg back to Start is the shortest path that keeps
+Stage 1 (route): a loop from Start through 4-6 waypoints that alternate far
+out and close in, then to the Beer Near, each stretch an A* search that never
+revisits a corner and never comes within ``keep_apart_m`` of trail laid
+earlier (no crossing, no running back down the other sidewalk). Turns are
+nearly free (the hare's few seconds to mark them) and straights past
+``straight_run_m`` cost extra, so routes twist. Routes are shortlisted on
+distance and turns per mile. The leg back to Start is a short path that keeps
 clear of the trail. Without a Beer Near, one is picked about ``return_miles``
 from Start.
 
@@ -38,7 +40,7 @@ import numpy as np
 
 from .graph import StreetGraph
 from .pack import HareProfile, HoundProfile, default_pack
-from .rules import COVER_M, STRAIGHT_DEG, Footprint, Geometry, is_sidewalk, jog_corners
+from .rules import COVER_M, STRAIGHT_DEG, Footprint, Geometry, is_sidewalk, jog_corners, turns_per_mile
 from .score import DistanceFit, ScoreCard, score_results
 from .sight import PackTiming, SightField, SightLines, check_looks_at_hare
 from .sim import SimResult, TrailModel, simulate_many
@@ -72,10 +74,16 @@ class GenerateOptions:
     # Route search: a turn costs the hare only the ~3 s it takes to bend down and mark it, about
     # 8 m at hare pace. Turns slow the pack far more than the hare, so they aren't avoided.
     turn_cost_m: float = 8.0
-    straight_run_m: float = 400.0     # route search: a straight longer than this...
+    straight_run_m: float = 150.0     # route search: a straight longer than this...
     straight_cost: float = 3.0        # ...costs this much extra per metre past it (long straights spread the pack)
+    waypoints: tuple[int, ...] = (4, 5, 6)  # loop points; alternate in and out so the route has room to twist
+    target_turns_per_mile: float = 12.0     # shortlist: routes this twisty (or more) count as fully twisty
     sight_cost: float = 3.0           # each metre the pack could see the hare run costs this many extra
     risky_check_share: float = 0.2    # chance a turn gets a check when checkers would look at the hare
+
+
+RUN_STEP_M = 25.0  # route search tracks the straight run so far in steps of this
+RETURN_STRAIGHT_M = 400.0  # the leg back to Start is nudged off straights longer than this
 
 
 # ---------------------------------------------------------------- local network
@@ -152,8 +160,8 @@ class Network:
         so repeated searches find different, still sensible, routes. With a
         ``sight`` field, each metre the pack could see the hare run costs
         ``sight_cost`` metres extra. Each metre of a straight run past
-        ``straight_run_m`` costs ``straight_cost`` extra (the run is tracked
-        along the best path to each state, so this is a heuristic nudge).
+        ``straight_run_m`` costs ``straight_cost`` extra (the run so far is part of
+        the search state, so this is exact to within ``RUN_STEP_M``).
         """
         if a == b:
             return []
@@ -165,7 +173,15 @@ class Network:
             return math.hypot(x - bx, y - by)
 
         factor: dict = {}
-        s0 = (a, came_from)
+        # The straight-run penalty depends on how long the run so far is, so it's part of the
+        # search state (in RUN_STEP_M buckets, capped where the penalty starts: past that, every
+        # metre costs the same). Otherwise a cheaper path with a long straight blocks the twisty one.
+        nb = int(math.ceil(straight_run_m / RUN_STEP_M)) if (straight_cost and straight_run_m < math.inf) else 0
+
+        def bucket(r):
+            return min(int(r // RUN_STEP_M), nb) if nb else 0
+
+        s0 = (a, came_from, bucket(run0))
         cost = {s0: 0.0}
         real = {s0: 0.0}
         run = {s0: run0}
@@ -175,7 +191,7 @@ class Network:
         goal = None
         while pq:
             _, d, st = heapq.heappop(pq)
-            u, p = st
+            u, p, _ = st
             if u == b:
                 goal = st
                 break
@@ -207,7 +223,7 @@ class Network:
                     # sidewalk or median has no single "straight on", but the street is still straight).
                     rn = run[st] + l if (p is None or geo.deviation(p, u, v) <= STRAIGHT_DEG) else l
                     nd += straight_cost * (max(0.0, rn - straight_run_m) - max(0.0, rn - l - straight_run_m))
-                nst = (v, u)
+                nst = (v, u, bucket(rn))
                 if nd >= cost.get(nst, math.inf):
                     continue
                 if fp.clashes((u, v, k), tag, pos0 + ru):
@@ -257,15 +273,27 @@ def path_len(g: StreetGraph, edges) -> float:
     return sum(g.edge_length(*e) for e in edges)
 
 
+def _tail_run(g: StreetGraph, geo: Geometry, edges: list[tuple]) -> float:
+    """Length of the straight the path ends on (so the next stretch carries it on)."""
+    run = 0.0
+    for i in range(len(edges) - 1, -1, -1):
+        run += g.edge_length(*edges[i])
+        if i == 0 or geo.deviation(edges[i - 1][0], edges[i][0], edges[i][1]) > STRAIGHT_DEG:
+            break
+    return run
+
+
 def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: random.Random,
                radius_m: float, keep_apart_m: float = 25.0, noise: float = 0.25,
                turn_cost_m: float = 8.0, timing: PackTiming | None = None, sight_cost: float = 0.0,
-               straight_run_m: float = math.inf, straight_cost: float = 0.0, stats: dict | None = None):
-    """One trail Start -> end shaped as a loop through two or three random waypoints.
+               straight_run_m: float = math.inf, straight_cost: float = 0.0, stats: dict | None = None,
+               waypoints: tuple[int, ...] = (4, 5, 6)):
+    """One trail Start -> end shaped as a loop through a few random waypoints.
 
-    Waypoints sit ``radius_m`` (jittered) out from Start, at increasing angles
-    measured from the direction of the Beer Near, so Start -> waypoints -> Beer
-    Near -> back to Start goes round once and never has to cross itself. Each
+    Waypoints sit at increasing angles measured from the direction of the Beer
+    Near, so Start -> waypoints -> Beer Near -> back to Start goes round once
+    and never has to cross itself. They alternate between about ``radius_m``
+    out from Start and about half that, so the route weaves in and out. Each
     stretch is an A* search that keeps clear of trail already laid and, given
     ``timing``, shies away from streets the pack could see the hare on.
 
@@ -275,13 +303,16 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
     ex, ey = geo.node_xy(end)
     base = math.atan2(ey - sy, ex - sx) if end != start else rng.uniform(0, 2 * math.pi)
     side = rng.choice((-1.0, 1.0))
-    n_wp = rng.choice((2, 2, 3))
-    angles = sorted(rng.uniform(40, 320) for _ in range(n_wp))
-    if any(b - a < 50 for a, b in zip(angles, angles[1:])):
-        return None
+    n_wp = rng.choice(waypoints)
+    # Evenly spread (jittered) angles, so the loop still goes round once without crossing itself,
+    # and points alternately far out and close in: the route weaves in and out instead of
+    # tracing the rim of the loop, so it has distance to spare for twists.
+    slot = 280.0 / n_wp
+    angles = [40 + (i + 0.5) * slot + rng.uniform(-0.25, 0.25) * slot for i in range(n_wp)]
+    outer = rng.randrange(2)
     wps = []
-    for ang in angles:
-        r = radius_m * rng.uniform(0.75, 1.25)
+    for i, ang in enumerate(angles):
+        r = radius_m * (rng.uniform(0.85, 1.15) if i % 2 == outer else rng.uniform(0.35, 0.6))
         th = base + side * math.radians(ang)
         wp = net.nearest(sx + r * math.cos(th), sy + r * math.sin(th), geo)
         if wp in (start, end) or wp in wps:
@@ -296,7 +327,7 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
     for i, goal in enumerate(stops):
         left = target_m * 1.25 - walked
         kw = dict(max_len=left, rng=rng, noise=noise, came_from=edges[-1][0] if edges else None,
-                  turn_cost_m=turn_cost_m)
+                  turn_cost_m=turn_cost_m, run0=_tail_run(net.g, geo, edges))
         here = edges[-1][1] if edges else start
         banned = visited - ({edges[-1][1]} if edges else set())
         nudges = dict(sight=sight, sight_cost=sight_cost, straight_run_m=straight_run_m, straight_cost=straight_cost)
@@ -753,14 +784,16 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
 
     routes = []
     stats: dict = {}
-    # Loop size: perimeter ~ (2 + 2 sin(half the spread)) * radius, times ~1.3 for streets.
-    radius = target / 4.6
+    # Loop size: a first guess (the route weaves in and out, so it's longer than the rim);
+    # each route found steers it toward the target.
+    radius = target / 5.5
     per_end = max(1, o.tries // len(ends))
     for e in ends:
         for _ in range(per_end):
             got = loop_route(net, geo, start, e, target, rng, radius, o.keep_apart_m,
                              turn_cost_m=o.turn_cost_m, timing=timing, sight_cost=o.sight_cost,
-                             straight_run_m=o.straight_run_m, straight_cost=o.straight_cost, stats=stats)
+                             straight_run_m=o.straight_run_m, straight_cost=o.straight_cost, stats=stats,
+                             waypoints=o.waypoints)
             if not got:
                 continue
             r, fp = got
@@ -769,7 +802,9 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
             fit = DistanceFit(target).score(length, []).value
             if fit <= 0:
                 continue
-            routes.append((fit + rng.random() * 1e-3, r, e, fp))
+            # Shortlist on shape too: a twisty route beats a rectangle of the same length.
+            twist = min(1.0, turns_per_mile(geo, r, _cum(g, r)) / o.target_turns_per_mile)
+            routes.append((fit * (0.5 + 0.5 * twist) + rng.random() * 1e-3, r, e, fp))
     if not routes:
         raise RuntimeError("No route found from Start that keeps clear of itself; try another Start, "
                            "a shorter --miles, or another --end")
@@ -781,8 +816,13 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
             fpr = fp.copy()
             fpr.zones += [(*geo.node_xy(start), 2 * o.keep_apart_m), (*geo.node_xy(e), 2 * o.keep_apart_m)]
             banned = {x[0] for x in r} - {start}
-            ret = net.clear_path(e, start, fpr, "return", 0.0, banned, max_len=back * 2.0,
-                                 came_from=r[-1][0], turn_cost_m=o.turn_cost_m)
+            kw = dict(max_len=back * 2.0, came_from=r[-1][0], turn_cost_m=o.turn_cost_m)
+            # The leg back is shorter and simpler: only the long straights get nudged.
+            ret = net.clear_path(e, start, fpr, "return", 0.0, banned, **kw,
+                                 straight_run_m=max(o.straight_run_m, RETURN_STRAIGHT_M),
+                                 straight_cost=o.straight_cost, run0=_tail_run(g, geo, r))
+            if ret is None:  # the long-straight nudge is a preference, never the reason there's no way back
+                ret = net.clear_path(e, start, fpr, "return", 0.0, banned, **kw)
             if ret is None:
                 continue
             fp = fp.copy()
