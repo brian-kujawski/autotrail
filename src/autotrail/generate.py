@@ -68,6 +68,7 @@ class GenerateOptions:
     false_mark_every_m: float = 25.0
     whichy_ways: tuple[int, int] = (0, 1)
     whichy_leg_m: tuple[float, float] = (50.0, 100.0)
+    exact_ends: bool = False          # Start/Beer Near were picked by hand: keep them unless a dead end
     turn_cost_m: float = 120.0        # route search: leaving a corner other than straight on costs this
     straight_run_m: float = 400.0     # route search: a straight longer than this...
     straight_cost: float = 3.0        # ...costs this much extra per metre past it (long straights spread the pack)
@@ -731,9 +732,11 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
     say(f"Searching {len(net.nodes):,} intersections within {radius / METRES_PER_MILE:.1f} mi of Start")
     # Start and Beer Near go on real corners (3+ ways), not dead-end stubs or mid-block points:
     # trail leaves Start one way and comes back in another.
-    if len(net.adj.get(start, ())) < 3:
+    # A hand-picked point mid-block (two ways) is fine: trail leaves one way, comes back the other.
+    need = 2 if o.exact_ends else 3
+    if len(net.adj.get(start, ())) < need:
         start = net.nearest(*geo.node_xy(start), geo)
-    if end is not None and end in net.adj and len(net.adj[end]) < 3:
+    if end is not None and end in net.adj and len(net.adj[end]) < need:
         end = net.nearest(*geo.node_xy(end), geo)
 
     if end is not None:

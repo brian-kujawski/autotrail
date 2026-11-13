@@ -54,9 +54,23 @@ def configure_osmnx(cache_root: Path) -> None:
     ox.settings.useful_tags_way = tags
 
 
+# OSMnx's "walk" filter, but keeping cycleways: hashes run on bike paths, and OSM often tags
+# a shared path through a park as highway=cycleway. Ways marked foot=no still drop out.
+HASH_WALK_FILTER = (
+    '["highway"]["area"!~"yes"]["access"!~"private"]'
+    '["highway"!~"abandoned|bus_guideway|construction|motor|no|planned|platform|proposed|raceway|razed|rest_area|services"]'
+    '["foot"!~"no"]["service"!~"private"]'
+    '["sidewalk"!~"separate"]["sidewalk:both"!~"separate"]["sidewalk:left"!~"separate"]["sidewalk:right"!~"separate"]'
+)
+GRAPH_FORMAT = 2  # bump when the download filter changes, so old caches get flagged
+
+
 def download_graph(area: Area) -> nx.MultiDiGraph:
-    """Download the walk network for the union of the area's places."""
+    """Download the walk network (plus cycleways) for the union of the area's places."""
     log.info("Downloading %s network for %s", area.network_type, ", ".join(area.places))
+    if area.network_type == "walk":
+        return ox.graph_from_place(list(area.places), custom_filter=HASH_WALK_FILTER,
+                                   simplify=True, retain_all=False)
     return ox.graph_from_place(
         list(area.places), network_type=area.network_type, simplify=True, retain_all=False
     )
@@ -79,6 +93,9 @@ def load_area_graph(
     if path.exists() and not force:
         G = ox.load_graphml(path, node_dtypes=_NODE_DTYPES, edge_dtypes=_EDGE_DTYPES)
         log.info("Loaded cached graph %s", path)
+        if int(G.graph.get("autotrail_format", 1)) < GRAPH_FORMAT:
+            log.warning("The cached map %s predates bike paths being included. Run "
+                        "'autotrail download --force' to refresh it.", path)
         return StreetGraph(G, area_key=area.key)
 
     configure_osmnx(root)
@@ -87,6 +104,7 @@ def load_area_graph(
     added = stitch_gaps(G, area.stitch_tolerance_m) if stitch else []
     log.info("Stitched %d gaps", len(added))
     G.graph["autotrail_area"] = area.key
+    G.graph["autotrail_format"] = GRAPH_FORMAT
     G.graph["autotrail_stitch_tolerance_m"] = area.stitch_tolerance_m if stitch else 0.0
     path.parent.mkdir(parents=True, exist_ok=True)
     ox.save_graphml(G, path)
@@ -367,6 +385,40 @@ class StreetGraph:
         along = line.project(p)
         offset = along / line.length * self.edge_length(*e) if line.length else 0.0
         return e, offset, float(line.distance(p))
+
+    def snap_to_street(self, lon: float, lat: float) -> dict:
+        """The nearest point on any street or path to a click, without changing the graph."""
+        (u, v, k), offset, dist = self.nearest_edge(lon, lat)
+        plon, plat = self.point_on_edge(u, v, k, offset)
+        d = self.G.edges[u, v, k]
+        name = d.get("name")
+        if isinstance(name, list):
+            name = " / ".join(str(x) for x in name)
+        return {"edge": (u, v, k), "offset_m": offset, "lon": plon, "lat": plat, "moved_m": dist,
+                "name": name if isinstance(name, str) and name else None, "highway": str(d.get("highway", ""))}
+
+    def node_at(self, lon: float, lat: float, end_tolerance_m: float = 3.0) -> int:
+        """A node exactly where the user clicked: the nearest point on the nearest street.
+
+        Within ``end_tolerance_m`` of an existing node, that node. Otherwise the street (and
+        its reverse twin) is split there, in memory only, and the new node is returned.
+        """
+        (u, v, k), offset, _ = self.nearest_edge(lon, lat)
+        length = self.edge_length(u, v, k)
+        if offset <= end_tolerance_m:
+            return u
+        if offset >= length - end_tolerance_m:
+            return v
+        line_m = self.edge_line_m(u, v, k)
+        d_m = offset / length * line_m.length if length else 0.0
+        new_id = min(0, min(self.G.nodes)) - 1
+        _split_edge(self.G, u, v, k, d_m, self._fwd, self._inv, new_id)
+        self.G.nodes[new_id]["virtual"] = False
+        self.G.nodes[new_id]["picked"] = True
+        _refresh_degrees(self.G, {new_id, u, v})
+        self._node_ids = self._node_xy = None  # spatial caches are stale now
+        self._edge_tree = None
+        return new_id
 
     def point_on_edge(self, u, v, k, offset_m: float) -> tuple[float, float]:
         length = self.edge_length(u, v, k)

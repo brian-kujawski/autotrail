@@ -74,7 +74,7 @@ def test_page_and_info(server):
 def test_snap_and_check(server, city):
     lat, lon = _ll(city, START)
     p = _get(f"{server}/api/snap?lat={lat + 0.0001}&lon={lon}")
-    assert int(p["node"]) == START and p["moved_m"] < 15
+    assert p["moved_m"] < 3 and abs(p["lat"] - (lat + 0.0001)) < 2e-5  # stays on the street, mid-block
     e = _ll(city, BEER)
     c = _get(f"{server}/api/check?start={lat},{lon}&end={e[0]},{e[1]}&miles=2")
     assert c["problem"] is None and 0.15 < c["walk_mi"] < 0.5
@@ -109,3 +109,28 @@ def test_bad_requests(server, city):
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(server + "/runs/..%2F..%2Fetc/passwd")
     assert e.value.code == 404
+
+
+def test_picked_point_mid_block_is_kept(tmp_path):
+    """A Beer Near clicked mid-block stays there: the street is split, not snapped to a corner."""
+    from conftest import build_city
+
+    from autotrail.graph import StreetGraph, annotate
+
+    G = build_city()
+    annotate(G)
+    g = StreetGraph(G, area_key="city")
+    lon, lat = g.node_lonlat(START)
+    elon, elat = g.node_lonlat(BEER)
+    nlon, _ = g.node_lonlat(BEER + 1)
+    mid = ((elon + nlon) / 2, elat)  # halfway along the block east of BEER
+    snapped = g.snap_to_street(*mid)
+    assert snapped["moved_m"] < 10
+    res = run(g, (lon, lat), mid, RunSettings(miles=2.0, seed=2, tries=40, runs=2), out=tmp_path / "t.geojson")
+    t = res.trail
+    assert t.end < 0 and g.G.nodes[t.end].get("picked")
+    x0, y0 = g.to_metres(snapped["lon"], snapped["lat"])
+    x1, y1 = g.to_metres(*g.node_lonlat(t.end))
+    assert ((x0 - x1) ** 2 + (y0 - y1) ** 2) ** 0.5 < 1.0
+    assert t.validate(g) == []
+    assert t.return_path and t.return_path[-1].v == t.start

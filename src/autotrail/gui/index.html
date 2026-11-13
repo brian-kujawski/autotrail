@@ -177,7 +177,8 @@ function hint() {
   else if (state.mode === "beer") h.textContent = "Click to move the Beer Near, or drag a marker";
   h.style.display = $("replay").style.display === "block" ? "none" : "block";
 }
-const fmt = p => `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}` + (p.moved_m > 15 ? ` (snapped ${Math.round(p.moved_m)} m)` : "");
+const fmt = p => (p.street ? `On ${p.street}` : `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`)
+  + (p.moved_m > 15 ? ` (moved ${Math.round(p.moved_m)} m to the nearest street)` : "");
 
 async function place(which, latlng) {
   const p = await api(`/api/snap?lat=${latlng.lat}&lon=${latlng.lng}`);

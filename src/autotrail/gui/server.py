@@ -34,7 +34,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from ..graph import StreetGraph
-from ..pipeline import RunSettings, check_ends, run
+from ..pipeline import RunSettings, preview_walk_mi, run
 from ..trail import METRES_PER_MILE
 
 log = logging.getLogger(__name__)
@@ -110,16 +110,13 @@ class GuiApp:
         return {"area": self.area_name, "bounds": self.bounds, "defaults": asdict(RunSettings())}
 
     def snap(self, lat: float, lon: float) -> dict:
-        n = self.g.nearest_node(lon, lat)
-        nlon, nlat = self.g.node_lonlat(n)
-        x0, y0 = self.g.to_metres(lon, lat)
-        x1, y1 = self.g.to_metres(nlon, nlat)
-        return {"node": str(n), "lat": nlat, "lon": nlon, "moved_m": round(math.hypot(x1 - x0, y1 - y0), 1)}
+        """The nearest point on the nearest street or path: where the marker should sit."""
+        p = self.g.snap_to_street(lon, lat)
+        return {"lat": p["lat"], "lon": p["lon"], "moved_m": round(p["moved_m"], 1),
+                "street": p["name"], "highway": p["highway"]}
 
     def check(self, start, end, miles: float) -> dict:
-        a = self.g.nearest_node(start[1], start[0])
-        b = self.g.nearest_node(end[1], end[0])
-        d, problem = check_ends(self.g, a, b, miles)
+        d, problem = preview_walk_mi(self.g, (start[1], start[0]), (end[1], end[0]), miles)
         return {"walk_mi": None if math.isinf(d) else round(d, 2), "problem": problem}
 
     def start_job(self, body: dict) -> Job:

@@ -34,7 +34,7 @@ autotrail gui
 
 Loads the map once (that part takes a while on Detroit), then opens `http://localhost:8765/` in
 your browser. Click the map to set **Start**, then click where the **Beer Near** goes (the car
-and cooler). Drag either marker to move it; both snap to the nearest intersection. The page
+and cooler). Drag either marker to move it; each lands on the nearest point of the street or path you clicked (mid-block is fine), and the trail starts or ends exactly there. The page
 tells you how far the Beer Near is on foot from Start and refuses a pair that can't make a
 trail of the length you asked for. Set the trail length, seed and, under *Pack, hare and
 search*, the pack, the hare and how many routes to try, then **Generate trail**. Progress shows
@@ -56,7 +56,7 @@ autotrail generate --start "42.3315,-83.0700" --open
 autotrail generate --start "42.3315,-83.0700" --end "42.3350,-83.0600" --miles 4 --seed 2 --out tuesday.geojson
 ```
 
-Start (and the Beer Near, if you give one) snap to the nearest intersection. With `--end`
+Start (and the Beer Near, if you give one) go on the nearest point of the nearest street or path. With `--end`
 the leg back to Start is sized from the real walk between the two (`--return-miles 0` still
 turns it off). Without `--end` a Beer Near is picked about `--return-miles` (default 1) from
 Start, and a hared leg back is added. It tries about 60 loop-shaped routes that keep clear of themselves, puts marks on the
@@ -89,6 +89,10 @@ The basemap defaults to Esri's street map, with satellite as a switch in the lay
 (`--tiles satellite` to start on it). OpenStreetMap's own tile servers refuse maps opened
 straight from a file, under their [tile usage policy](https://operations.osmfoundation.org/policies/tiles/),
 so `--tiles osm` only works if you serve the HTML over http (for example `python -m http.server`).
+
+The download is OSMnx's walking network plus cycleways (OSM often tags a shared path through a
+park as a cycleway, and hashes run on bike paths; ways marked `foot=no` are still left out). A map
+cached before this change prints a warning: run `autotrail download --force` to refresh it.
 
 The cached graph lives in `data/cache/<area>.graphml` (set `AUTOTRAIL_DATA` to move it).
 Use `autotrail download --force` to refresh it.
