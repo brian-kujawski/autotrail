@@ -246,6 +246,7 @@ def gui(
     a = get_area(area, areas_file)
     typer.echo(f"Loading the {a.name} map (once; every trail after this skips it)...")
     g = load_area_graph(a)
+    typer.echo("Indexing streets for map clicks...")
     app_ = GuiApp(g, a.name, runs_dir or data_dir() / "gui_runs", tiles=tiles)
     srv = serve(app_, host, port)
     url = f"http://{'localhost' if host in ('127.0.0.1', '0.0.0.0') else host}:{srv.server_address[1]}/"

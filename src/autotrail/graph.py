@@ -14,6 +14,7 @@ Node attributes: x (lon), y (lat), degree (distinct neighbours).
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -331,6 +332,8 @@ class StreetGraph:
         self._node_xy: np.ndarray | None = None
         self._edge_tree: STRtree | None = None
         self._edge_keys: list[tuple] = []
+        self._split_into: dict[tuple, list[tuple]] = {}  # edges split after the index was built
+        self._index_lock = threading.Lock()
 
     # -- basics
     def has_edge(self, u, v, k=0) -> bool:
@@ -360,14 +363,47 @@ class StreetGraph:
     def nearest_node(self, lon: float, lat: float) -> int:
         if self._node_ids is None:
             ids = list(self.G.nodes)
+            lons = np.array([self.G.nodes[n]["x"] for n in ids], dtype=float)
+            lats = np.array([self.G.nodes[n]["y"] for n in ids], dtype=float)
+            nx_, ny_ = self._fwd.transform(lons, lats)
             self._node_ids = np.array(ids, dtype=object)
-            self._node_xy = np.array([self.to_metres(*self.node_lonlat(n)) for n in ids])
+            self._node_xy = np.column_stack([nx_, ny_])
         x, y = self.to_metres(lon, lat)
         d2 = (self._node_xy[:, 0] - x) ** 2 + (self._node_xy[:, 1] - y) ** 2
         return self._node_ids[int(np.argmin(d2))]
 
     def edge_line_m(self, u, v, k=0) -> LineString:
         return transform(self._fwd.transform, self.edge_line(u, v, k))
+
+    def edge_index(self) -> tuple[STRtree, list[tuple]]:
+        """A spatial index of every street (one direction each), built once and kept.
+
+        Built in one vectorised pass: on the Detroit map (430k edges) going edge by
+        edge took long enough that the first click on the GUI map seemed to do nothing.
+        """
+        with self._index_lock:
+            if self._edge_tree is None:
+                keys, seen, parts, counts = [], set(), [], []
+                nodes = self.G.nodes
+                for u, v, k, d in self.G.edges(keys=True, data=True):
+                    twin = (v, u, round(float(d["length"]), 1))
+                    if twin in seen:
+                        continue
+                    seen.add((u, v, round(float(d["length"]), 1)))
+                    geom = d.get("geometry")
+                    if geom is None:
+                        c = np.array([(nodes[u]["x"], nodes[u]["y"]), (nodes[v]["x"], nodes[v]["y"])])
+                    else:
+                        c = np.asarray(geom.coords)[:, :2]
+                    keys.append((u, v, k))
+                    parts.append(c)
+                    counts.append(len(c))
+                xy = np.concatenate(parts)
+                x, y = self._fwd.transform(xy[:, 0], xy[:, 1])
+                lines = shapely.linestrings(np.column_stack([x, y]), indices=np.repeat(np.arange(len(keys)), counts))
+                self._edge_keys = keys
+                self._edge_tree = STRtree(lines)
+            return self._edge_tree, self._edge_keys
 
     def nearest_edge(self, lon: float, lat: float, among: list[tuple] | None = None):
         """Return ((u, v, k), offset_m along the edge, distance_m) for the closest edge."""
@@ -376,11 +412,10 @@ class StreetGraph:
             best = min(((e, self.edge_line_m(*e)) for e in among), key=lambda t: t[1].distance(p))
             e, line = best
         else:
-            if self._edge_tree is None:
-                self._edge_keys = list(self.G.edges(keys=True))
-                self._edge_tree = STRtree([self.edge_line_m(*e) for e in self._edge_keys])
-            i = int(self._edge_tree.query_nearest(p)[0])
-            e = self._edge_keys[i]
+            tree, keys = self.edge_index()
+            e = keys[int(tree.query_nearest(p)[0])]
+            while e in self._split_into:  # split since the index was built: pick the nearer piece
+                e = min(self._split_into[e], key=lambda x: self.edge_line_m(*x).distance(p))
             line = self.edge_line_m(*e)
         along = line.project(p)
         offset = along / line.length * self.edge_length(*e) if line.length else 0.0
@@ -412,12 +447,18 @@ class StreetGraph:
         line_m = self.edge_line_m(u, v, k)
         d_m = offset / length * line_m.length if length else 0.0
         new_id = min(0, min(self.G.nodes)) - 1
+        twins = _reverse_twins(self.G, u, v, length)
         _split_edge(self.G, u, v, k, d_m, self._fwd, self._inv, new_id)
         self.G.nodes[new_id]["virtual"] = False
         self.G.nodes[new_id]["picked"] = True
         _refresh_degrees(self.G, {new_id, u, v})
-        self._node_ids = self._node_xy = None  # spatial caches are stale now
-        self._edge_tree = None
+        self._node_ids = self._node_xy = None  # node lookup is cheap to rebuild
+        # The edge index is not: remember where the old edges went instead.
+        self._split_into[(u, v, k)] = [(u, new_id, _last_key(self.G, u, new_id)),
+                                       (new_id, v, _last_key(self.G, new_id, v))]
+        for k2 in twins:
+            self._split_into[(v, u, k2)] = [(v, new_id, _last_key(self.G, v, new_id)),
+                                            (new_id, u, _last_key(self.G, new_id, u))]
         return new_id
 
     def point_on_edge(self, u, v, k, offset_m: float) -> tuple[float, float]:

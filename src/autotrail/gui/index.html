@@ -157,7 +157,9 @@ function icon(colour, text) {
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 
 async function api(path, opts) {
-  const r = await fetch(path, opts);
+  let r;
+  try { r = await fetch(path, opts); }
+  catch (e) { throw new Error("the Autotrail server isn't answering; is `autotrail gui` still running?"); }
   const body = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(body.error || r.statusText);
   return body;
@@ -180,18 +182,37 @@ function hint() {
 const fmt = p => (p.street ? `On ${p.street}` : `${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`)
   + (p.moved_m > 15 ? ` (moved ${Math.round(p.moved_m)} m to the nearest street)` : "");
 
-async function place(which, latlng) {
-  const p = await api(`/api/snap?lat=${latlng.lat}&lon=${latlng.lng}`);
-  state[which] = p;
+const seq = { start: 0, beer: 0 };
+function putMarker(which, lat, lon, pending) {
   const mk = which === "start" ? "startMk" : "beerMk";
   const colour = which === "start" ? css("--start") : css("--beer");
   const label = which === "start" ? "S" : "B";
   if (!window[mk]) {
-    window[mk] = L.marker([p.lat, p.lon], { icon: icon(colour, label), draggable: true, title: which === "start" ? "Start" : "Beer Near" })
+    window[mk] = L.marker([lat, lon], { icon: icon(colour, label), draggable: true, title: which === "start" ? "Start" : "Beer Near" })
       .addTo(map).on("dragend", e => place(which, e.target.getLatLng()));
-  } else window[mk].setLatLng([p.lat, p.lon]);
-  $(which === "start" ? "startWhere" : "beerWhere").textContent = fmt(p);
+  } else window[mk].setLatLng([lat, lon]);
+  window[mk].setOpacity(pending ? 0.55 : (which === "beer" && state.auto ? 0.35 : 1));
+}
+
+async function place(which, latlng) {
+  // The marker goes down at the click straight away; it then slides onto the nearest street.
+  const n = ++seq[which];
+  const where = $(which === "start" ? "startWhere" : "beerWhere");
+  state[which] = { lat: latlng.lat, lon: latlng.lng, moved_m: 0, street: null };
+  putMarker(which, latlng.lat, latlng.lng, true);
+  where.textContent = "Finding the nearest street…";
   if (which === "start" && !state.beer && !state.auto) setMode("beer");
+  try {
+    const p = await api(`/api/snap?lat=${latlng.lat}&lon=${latlng.lng}`);
+    if (n !== seq[which]) return;  // a newer click on this marker won
+    state[which] = p;
+    putMarker(which, p.lat, p.lon, false);
+    where.textContent = fmt(p);
+  } catch (e) {
+    if (n !== seq[which]) return;
+    putMarker(which, latlng.lat, latlng.lng, false);
+    where.textContent = `Couldn't find the nearest street (${e.message}). The run will try from the click.`;
+  }
   await checkEnds();
 }
 
@@ -306,7 +327,7 @@ async function init() {
   L.rectangle(info.bounds, { color: "#888", weight: 1, fill: false, dashArray: "4 4", interactive: false }).addTo(map);
   map.on("click", e => {
     const which = state.auto ? "start" : state.mode;
-    place(which, e.latlng).catch(err => { $("walkNote").textContent = err.message; });
+    place(which, e.latlng).catch(err => { $("walkNote").textContent = err.message; $("walkNote").classList.add("bad"); });
   });
   $("pinStart").onclick = () => setMode("start");
   $("pinBeer").onclick = () => { if (!state.auto) setMode("beer"); };

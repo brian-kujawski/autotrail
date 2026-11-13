@@ -101,6 +101,7 @@ class GuiApp:
         self.tiles = tiles
         self.jobs: dict[str, Job] = {}
         self.busy = threading.Lock()
+        g.edge_index()  # build the click-snapping index now, not on the first click
         lons = [d["x"] for _, d in g.G.nodes(data=True)]
         lats = [d["y"] for _, d in g.G.nodes(data=True)]
         self.bounds = [[min(lats), min(lons)], [max(lats), max(lons)]]
@@ -253,6 +254,9 @@ def make_handler(app: GuiApp):
                 return self._err("Not found", HTTPStatus.NOT_FOUND)
             except (KeyError, ValueError) as e:
                 return self._err(f"Bad request: {e}")
+            except Exception as e:  # show it on the page and in the console, don't just drop the request
+                log.error("GET %s failed:\n%s", self.path, traceback.format_exc())
+                return self._err(f"{e.__class__.__name__}: {e}", HTTPStatus.INTERNAL_SERVER_ERROR)
 
         def do_POST(self):
             u = urlparse(self.path)
