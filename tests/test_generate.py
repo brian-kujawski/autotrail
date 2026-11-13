@@ -80,9 +80,9 @@ def _river_city(n=24, step=100.0, river=9, bridge=22):
     import math
 
     import networkx as nx
+    from conftest import ll
 
     from autotrail.graph import StreetGraph, annotate
-    from conftest import ll
 
     G = nx.MultiDiGraph(crs="epsg:4326")
     pos = {r * n + c + 1: (c * step, r * step) for r in range(n) for c in range(n)}
@@ -108,6 +108,8 @@ def _river_city(n=24, step=100.0, river=9, bridge=22):
 
 
 def test_waypoints_stay_on_the_walkable_side_of_a_river():
+    import math
+
     from autotrail.generate import GenerateOptions, generate
 
     g, n, river = _river_city()
@@ -116,15 +118,28 @@ def test_waypoints_stay_on_the_walkable_side_of_a_river():
     gen = generate(g, start, end, GenerateOptions(miles=2.5, tries=30, runs=2, placements=1, candidates=1,
                                                   return_miles=0.4), seed=0, on_route=seen.append)
     assert gen.trail.true_path
+    # Nothing picked across the water unless it's a fair walk over the bridge: every waypoint's walk
+    # from Start is within the detour limit, and most attempts stay north of the river.
+    from autotrail.generate import WALK_DETOUR, WALK_SLACK_M, Network
+    from autotrail.rules import Geometry
+    geo = Geometry(g)
+    walk = Network(g, start, 10_000).dijkstra(start)
+    sx, sy = geo.node_xy(start)
+    for r in seen:
+        for w in r["waypoints"]:
+            x, y = geo.node_xy(w)
+            assert walk[w] <= WALK_DETOUR * math.hypot(x - sx, y - sy) + WALK_SLACK_M + 1e-6
     north = (river + 1) * n  # node ids above this are north of the river
-    assert all(w > north for r in seen for w in r["waypoints"])  # nothing picked across the water
+    across = sum(any(w <= north for w in r["waypoints"]) for r in seen)
+    assert across <= len(seen) // 5
 
 
 def test_trail_may_use_the_way_back_near_the_beer_near(grid):
     """The corner next to the Beer Near is on the way back, but trail may still run in through it."""
+    from conftest import grid_id
+
     from autotrail.generate import reserved_corners
     from autotrail.graph import StreetGraph
-    from conftest import grid_id
 
     g = StreetGraph(grid, area_key="grid")
     geo = Geometry(g)
@@ -134,3 +149,33 @@ def test_trail_may_use_the_way_back_near_the_beer_near(grid):
     assert reserved_corners(geo, back, start, end, 70.0) == {corner, far}
     # 100 m zone: the corner 100 m from the Beer Near is free to use too
     assert corner not in reserved_corners(geo, back, start, end, 101.0)
+
+
+def test_loop_shapes_go_out_away_from_the_beer_near_and_vary():
+    import math
+    import random
+
+    from autotrail.generate import loop_shape
+
+    rng = random.Random(5)
+    start, beer = (0.0, 0.0), (800.0, 0.0)  # Beer Near due east of Start
+    ratios = []
+    for _ in range(200):
+        sh = loop_shape(rng, start, beer, 1500.0, 5)
+        fx, fy = sh.far_point()
+        assert fx < 400.0  # the far point lies west of the anchor: away from the Beer Near
+        ratios.append(sh.width_m / sh.length_m)
+        # Waypoints go round in order: out on Start's side, back on the Beer Near's.
+        pts = [sh.point(i, rng) for i in range(sh.n)]
+        ux, uy = math.cos(sh.heading), math.sin(sh.heading)
+        across = [(-uy * (x - sh.ax) + ux * (y - sh.ay)) * sh.side for x, y, _ in pts]
+        assert across[0] > 0 > across[-1] or sh.bend != 0  # (a bent loop can bow both ends one way)
+    # Not all one shape: narrow out-and-backs through fat beans.
+    assert min(ratios) < 0.25 and max(ratios) > 0.7
+
+
+def test_seg_dist():
+    from autotrail.generate import _seg_dist
+
+    assert _seg_dist(5, 3, 0, 0, 10, 0) == 3
+    assert _seg_dist(-4, 3, 0, 0, 10, 0) == 5

@@ -381,6 +381,9 @@ class StreetGraph:
     def to_metres(self, lon: float, lat: float) -> tuple[float, float]:
         return self._fwd.transform(lon, lat)
 
+    def to_lonlat(self, x: float, y: float) -> tuple[float, float]:
+        return self._inv.transform(x, y)
+
     def best_key(self, u, v) -> int:
         """Shortest parallel edge between two adjacent nodes."""
         return min(self.G[u][v], key=lambda k: self.G[u][v][k]["length"])

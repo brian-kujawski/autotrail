@@ -42,11 +42,29 @@ import numpy as np
 from .facts import corner_facts
 from .graph import StreetGraph
 from .pack import HareProfile, HoundProfile, default_pack
-from .rules import CORRIDOR_M, COVER_M, STRAIGHT_DEG, Footprint, Geometry, is_sidewalk, jog_corners, turns_per_mile
+from .rules import (
+    CORRIDOR_M,
+    COVER_M,
+    STRAIGHT_DEG,
+    Footprint,
+    Geometry,
+    is_sidewalk,
+    jog_corners,
+    turns_per_mile,
+)
 from .score import DistanceFit, ScoreCard, score_results
 from .sight import PackTiming, SightField, SightLines, check_looks_at_hare
 from .sim import SimResult, TrailModel, simulate_many
-from .trail import METRES_PER_MILE, Branch, BranchPurpose, EdgePos, EdgeRef, Mark, MarkKind, Trail
+from .trail import (
+    METRES_PER_MILE,
+    Branch,
+    BranchPurpose,
+    EdgePos,
+    EdgeRef,
+    Mark,
+    MarkKind,
+    Trail,
+)
 
 
 @dataclass
@@ -91,6 +109,8 @@ WALK_DETOUR = 1.5          # a waypoint's walk from Start may be this many times
 WALK_SLACK_M = 200.0       # ...plus this (a grid is up to 1.41x; more means a river or freeway in the way)
 WAYPOINT_DRAWS = 6         # tries at each waypoint before giving up the attempt
 WAYPOINT_SNAP = 0.35       # a waypoint may sit this share of its radius from the point drawn
+SHAPE_DRAWS = 5            # tries to find a loop whose far end is somewhere walkable
+KEEP_OUT_SHARE = 0.25      # no waypoint within this share of the loop radius of Start, the Beer Near or between
 
 
 # ---------------------------------------------------------------- local network
@@ -367,6 +387,95 @@ def reserved_corners(geo: Geometry, reserved: list[tuple], start, end, zone_m: f
             if all(math.hypot(geo.node_xy(n)[0] - x, geo.node_xy(n)[1] - y) > zone_m for x, y in pts)}
 
 
+def _seg_dist(px, py, ax, ay, bx, by) -> float:
+    """Distance from (px, py) to the segment (ax, ay)-(bx, by)."""
+    dx, dy = bx - ax, by - ay
+    t = 0.0 if dx == dy == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(px - ax - t * dx, py - ay - t * dy)
+
+
+@dataclass
+class LoopShape:
+    """Where a trail's waypoints go: one loop out from Start and back in to the Beer Near.
+
+    The loop runs from the middle of Start and the Beer Near (the anchor) out
+    to a far point and back. The far point is roughly away from the Beer Near
+    (``loop_shape`` allows 70 degrees either side, more if that end is unwalkable), so trail heads out one side and comes
+    home the other without wrapping round Start. Only the order is fixed (one
+    way round, never back across itself); the shape is drawn fresh each time:
+    long and narrow (a long out-and-back), fat (a bean), bent (a banana),
+    fatter at one end than the other, and every point at its own distance.
+    """
+    ax: float           # anchor: midway between Start and the Beer Near
+    ay: float
+    heading: float      # anchor -> far point
+    length_m: float     # anchor to far point
+    width_m: float      # widest point side to side
+    bend: float         # sideways bow of the middle, as a share of length (banana / bean)
+    skew: float         # one end fatter than the other (-1..1)
+    side: float         # +1 / -1: which side trail goes out on
+    n: int
+    start_deg: float    # sweep from here round to 360 - start_deg (0 = the anchor end)
+    outer: int          # which waypoints (odd or even) sit out on the rim; the rest sit in
+
+    def point(self, i: int, rng: random.Random) -> tuple[float, float, float]:
+        """A draw for waypoint i (jittered each call): (x, y, how far it is from the loop's middle)."""
+        span = 360.0 - 2 * self.start_deg
+        slot = span / self.n
+        phi = math.radians(self.start_deg + (i + 0.5 + rng.uniform(-0.3, 0.3)) * slot)
+        # Alternately out on the rim and pulled in toward the middle (not toward Start), so the
+        # route weaves and has distance to spare for twists.
+        k = rng.uniform(0.85, 1.15) if i % 2 == self.outer else rng.uniform(0.5, 0.75)
+        along = -math.cos(phi) * self.length_m / 2 * k
+        across = math.sin(phi) * self.width_m / 2 * k * (1 + self.skew * math.cos(phi))
+        across += self.bend * self.length_m * math.sin(phi) ** 2 / 2
+        a, s = self.side * across, along + self.length_m / 2
+        ux, uy = math.cos(self.heading), math.sin(self.heading)
+        x = self.ax + ux * s - uy * a
+        y = self.ay + uy * s + ux * a
+        return x, y, max(math.hypot(along, across), 0.25 * self.length_m)
+
+    def far_point(self) -> tuple[float, float]:
+        return (self.ax + math.cos(self.heading) * self.length_m, self.ay + math.sin(self.heading) * self.length_m)
+
+    def outline(self, steps: int = 48) -> list[tuple[float, float]]:
+        """The loop's middle line (no jitter, everything on the rim), for drawing."""
+        pts = []
+        for j in range(steps + 1):
+            phi = math.radians(self.start_deg + j * (360.0 - 2 * self.start_deg) / steps)
+            along = -math.cos(phi) * self.length_m / 2
+            across = math.sin(phi) * self.width_m / 2 * (1 + self.skew * math.cos(phi))
+            across += self.bend * self.length_m * math.sin(phi) ** 2 / 2
+            a, s = self.side * across, along + self.length_m / 2
+            ux, uy = math.cos(self.heading), math.sin(self.heading)
+            pts.append((self.ax + ux * s - uy * a, self.ay + uy * s + ux * a))
+        return pts
+
+
+def loop_shape(rng: random.Random, start_xy, end_xy, radius_m: float, n: int,
+               spread_deg: float = 70.0) -> LoopShape:
+    """Draw a loop for ``n`` waypoints whose length comes out at roughly 5.5x ``radius_m``."""
+    sx, sy = start_xy
+    ex, ey = end_xy
+    if (sx, sy) == (ex, ey):
+        away = rng.uniform(0, 2 * math.pi)
+    else:
+        away = math.atan2(sy - ey, sx - ex)  # from the Beer Near through Start, and on
+    spread = min(spread_deg, 180.0)
+    heading = away + math.radians(rng.uniform(-spread, spread))
+    ratio = rng.uniform(0.15, 0.8)  # width / length: 0.15 is nearly an out-and-back, 0.8 a fat bean
+    # The rim is about pi/2 * (length + width); the route weaves in and out of it and twists
+    # (about 10% more), so this lands near the old loop's 5.5x radius.
+    length = 5.0 * radius_m * rng.uniform(0.85, 1.15) / (math.pi / 2 * (1 + ratio))
+    ax, ay = (sx + ex) / 2, (sy + ey) / 2
+    # Go out on Start's side of the line to the far point, come home on the Beer Near's.
+    ux, uy = math.cos(heading), math.sin(heading)
+    off = -uy * (sx - ax) + ux * (sy - ay)
+    side = math.copysign(1.0, off) if abs(off) > 1.0 else rng.choice((-1.0, 1.0))
+    return LoopShape(ax, ay, heading, length, length * ratio, rng.uniform(-0.25, 0.25),
+                     rng.uniform(-0.4, 0.4), side, n, 30.0, rng.randrange(2))
+
+
 def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: random.Random,
                radius_m: float, keep_apart_m: float = 25.0, noise: float = 0.25,
                turn_cost_m: float = 8.0, timing: PackTiming | None = None, sight_cost: float = 0.0,
@@ -375,11 +484,11 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
                trace: dict | None = None):
     """One trail Start -> end shaped as a loop through a few random waypoints.
 
-    Waypoints sit at increasing angles measured from the direction of the Beer
-    Near, so Start -> waypoints -> Beer Near -> back to Start goes round once
-    and never has to cross itself. They alternate between about ``radius_m``
-    out from Start and about half that, so the route weaves in and out. Each
-    stretch is an A* search that keeps clear of trail already laid and, given
+    The waypoints go round one loop in order (see ``LoopShape``): out from
+    Start, round a far point away from the Beer Near, and back in to the Beer
+    Near, so no leg has to cross an earlier one. None sits near Start, the
+    Beer Near or the stretch between them: those streets are left for the
+    first and last legs and the way back. Each stretch is an A* search that keeps clear of trail already laid and, given
     ``timing``, shies away from streets the pack could see the hare on.
 
     ``reserved`` is the leg back to Start, planned first: trail keeps clear of
@@ -394,23 +503,27 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
     sx, sy = geo.node_xy(start)
     ex, ey = geo.node_xy(end)
     reserved_nodes = reserved_corners(geo, reserved, start, end, END_ZONE_M)
-    base = math.atan2(ey - sy, ex - sx) if end != start else rng.uniform(0, 2 * math.pi)
-    side = rng.choice((-1.0, 1.0))
     n_wp = rng.choice(waypoints)
-    # Evenly spread (jittered) angles, so the loop still goes round once without crossing itself,
-    # and points alternately far out and close in: the route weaves in and out instead of
-    # tracing the rim of the loop, so it has distance to spare for twists.
-    slot = 280.0 / n_wp
-    outer = rng.randrange(2)
     walkable = getattr(net, "_ok", None) is not None
+    for k in range(SHAPE_DRAWS if walkable else 1):
+        # Away from the Beer Near first; if the far end is in a river or past a freeway, swing wider.
+        shape = loop_shape(rng, (sx, sy), (ex, ey), radius_m, n_wp, spread_deg=70.0 + 20.0 * k)
+        fx, fy = shape.far_point()
+        c = net.nearest(fx, fy, geo, walkable=True) if walkable else None
+        if c is None or not walkable:
+            continue
+        cx, cy = geo.node_xy(c)
+        if math.hypot(cx - fx, cy - fy) <= WAYPOINT_SNAP * shape.length_m / 2:
+            break
+    tr["shape"] = shape
+    keep_out = KEEP_OUT_SHARE * radius_m
     wps = []
     for i in range(n_wp):
         wp = None
         for _ in range(WAYPOINT_DRAWS if walkable else 1):
-            ang = 40 + (i + 0.5) * slot + rng.uniform(-0.3, 0.3) * slot
-            r = radius_m * (rng.uniform(0.85, 1.15) if i % 2 == outer else rng.uniform(0.35, 0.6))
-            th = base + side * math.radians(ang)
-            px, py = sx + r * math.cos(th), sy + r * math.sin(th)
+            px, py, r = shape.point(i, rng)
+            if _seg_dist(px, py, sx, sy, ex, ey) < keep_out:
+                continue  # leave the streets around Start and the Beer Near to the first and last legs
             c = net.nearest(px, py, geo, walkable=walkable)
             if c is None or c in (start, end) or c in wps or c in reserved_nodes:
                 continue
@@ -478,8 +591,18 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
                 break
             seg = None
         if seg is None:
-            tr["reason"] = (f"no clear way to waypoint {i + 1} of {len(wps)}" if i < len(wps)
-                            else "no clear way into the Beer Near")
+            # Out of length, or really boxed in? The plain shortest walk through what's left says.
+            least, here2 = walked, here
+            for goal2 in stops[i:]:
+                least += net.shortest_m(here2, goal2, geo)
+                here2 = goal2
+            if least > target_m * MAX_LEN_SHARE:
+                tr["too_long_m"] = least
+                tr["reason"] = (f"loop too big: at least {least / METRES_PER_MILE:.1f} mi by the Beer Near "
+                                f"(limit {target_m * MAX_LEN_SHARE / METRES_PER_MILE:.1f})")
+            else:
+                tr["reason"] = (f"no clear way to waypoint {i + 1} of {len(wps)}" if i < len(wps)
+                                else "no clear way into the Beer Near")
             return None
         for e in seg:
             fp.add(e, "true", walked)
@@ -942,8 +1065,11 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
                                  turn_cost_m=o.turn_cost_m, timing=timing, sight_cost=o.sight_cost,
                                  straight_run_m=o.straight_run_m, straight_cost=o.straight_cost, stats=stats,
                                  waypoints=o.waypoints, reserved=ret, trace=trace)
+            if trace.get("too_long_m"):
+                radius *= (target / trace["too_long_m"]) ** 0.5  # steer smaller on loops that ran out of length
             info = {"n": n_try, "of": total, "start": start, "end": e, "return": ret or [],
                     "waypoints": trace["waypoints"], "edges": trace["edges"], "ok": False,
+                    "outline": trace["shape"].outline() if trace.get("shape") else [],
                     "reason": trace["reason"], "seconds": time.time() - t0}
             if got:
                 r, fp = got

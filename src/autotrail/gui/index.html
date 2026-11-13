@@ -140,7 +140,7 @@ pre.report { font-size: 11px; white-space: pre-wrap; background: var(--chip); pa
       <button class="small" id="stepRun" type="button" title="Stop pausing and run the rest">Run the rest</button>
       <button class="small" id="stepStop" type="button" title="Stop this run">Stop</button>
     </div>
-    <div class="legend"><i style="border-color:var(--accent)"></i>trail tried<i class="back" style="border-color:#2563eb"></i>way back<span style="margin-left:8px">① ② … waypoints</span></div>
+    <div class="legend"><i style="border-color:var(--accent)"></i>trail tried<i class="back" style="border-color:#2563eb"></i>way back<span style="margin-left:8px">① ② … waypoints</span><i class="back" style="border-color:#9ca3af"></i>loop they were drawn around</div>
     <div class="legend" id="factLegend" style="display:none">Wrong ways at each corner:<i style="border-color:#be123c"></i>shortcut<i class="back" style="border-color:#d97706"></i>meets trail, saves little<i style="border-color:#6b7280"></i>dead end<i style="border-color:#16a34a"></i>safe<span style="margin-left:8px">◉ checkers would see the hare</span>
       <label style="display:block;margin-top:4px"><input type="checkbox" id="factSafe"> show safe ways too</label></div>
     <div class="what" id="factWhat"></div>
@@ -323,6 +323,8 @@ function drawRoute(j) {
   if ($("replay").style.display === "block") showTab("pick");
   if (tryLayer) tryLayer.remove();
   tryLayer = L.layerGroup().addTo(map);
+  // The loop the waypoints were drawn around (they're jittered off it, in and out).
+  if (r.outline && r.outline.length) L.polyline(r.outline, { color: "#111827", weight: 1.5, opacity: .5, dashArray: "2 6" }).addTo(tryLayer);
   if (r.back.length) L.polyline(r.back, { color: "#2563eb", weight: 4, opacity: .8, dashArray: "8 6" }).addTo(tryLayer);
   // With corner facts on top, fade the trail so the coloured wrong ways stand out.
   if (r.trail.length) L.polyline(r.trail, { color: r.ok ? css("--accent") : "#6b7280", weight: 4, opacity: r.facts ? .4 : .9,

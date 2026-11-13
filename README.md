@@ -125,9 +125,16 @@ Both the generator and the simulated hounds follow these (`autotrail.rules`):
 * **Twisty, not rectangles.** Turns slow the pack far more than the hare (a mark takes the hare
   about 3 s), so the route search charges a turn only that (~8 m), and charges 3x extra for
   every metre of a straight past 150 m (400 m on the shorter, simpler leg back to Start). The
-  loop's waypoints alternate far out and close in, so the route has distance to spare for
-  twists, and routes are shortlisted (and scored, `twistiness`) on turns per mile as well as
+  loop's waypoints alternate out on its rim and in toward its middle, so the route has
+  distance to spare for twists, and routes are shortlisted (and scored, `twistiness`) on turns per mile as well as
   distance. On a 100 m test grid that's ~15 turns per mile with straights of a block or two.
+* **One loop, out and back in.** Waypoints go round one loop in order: out from Start, round a
+  far point roughly away from the Beer Near, and home to the Beer Near, so no leg has to cut
+  across an earlier one. None sits near Start, the Beer Near or the streets between them (a
+  quarter of the loop radius), leaving those for the first and last legs and the way back. The
+  shape is drawn fresh each time: long and narrow (nearly an out-and-back) through fat beans,
+  bent, lopsided, every point at its own distance. "Loop" is only topology. If the far end
+  would be in a river or past a freeway, the loop swings wider.
 * **Keep hounds honest.** Most checks are at turns, but some checks and whichy-ways have
   straight on as the answer: any quarter mile with no check or whichy-way may get one at a
   crossing, and now and then a run of short blocks gets a whichy-way at every crossing

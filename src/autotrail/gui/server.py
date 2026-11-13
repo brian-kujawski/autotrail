@@ -226,6 +226,8 @@ class GuiApp:
              "seconds": round(info.get("seconds", 0.0), 1),
              "trail": line(info["edges"]), "back": line(info["return"]),
              "waypoints": [latlon(w) for w in info["waypoints"]],
+             "outline": [[round(lat, 6), round(lon, 6)] for lon, lat in
+                         (g.to_lonlat(x, y) for x, y in info.get("outline", []))],
              "start": latlon(info["start"]), "end": latlon(info["end"])}
         if "length_m" in info:
             r.update(miles=round(info["length_m"] / METRES_PER_MILE, 2),
