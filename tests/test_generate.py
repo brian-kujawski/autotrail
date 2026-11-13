@@ -29,8 +29,9 @@ def test_generated_marks(generated, city):
     t = generated.trail
     model = TrailModel(t, city)
     assert len(model.checks) >= 2
-    spacing = [b.s - a.s for a, b in zip(model.checks, model.checks[1:])]
-    assert all(s >= 300.0 - 1e-6 for s in spacing)
+    checks = [c for c in model.checks if c.kind == "check"]  # (a run of whichy-ways can be a block apart)
+    spacing = [b.s - a.s for a, b in zip(checks, checks[1:])]
+    assert all(s >= 150.0 - 1e-6 for s in spacing)  # straight-on checks keep 150 m from others
     check_nodes = {c.node for c in model.checks}
     assert all(b.from_node in check_nodes for b in t.branches)
     assert sum(m.kind == MarkKind.FALSE for m in t.marks) == len(t.branches)

@@ -6,6 +6,10 @@
   (at least ``CLEAR_DEG`` more). A road bend with only one way on is straight
   too. Anything else (a turn, a fork with two near-straight legs, a T) needs a
   check, an arrow or a whichy-way.
+* **Jogs are straight.** Two turns that cancel out (the way out is within
+  ``STRAIGHT_DEG`` of the way in) with under ``JOG_M`` between them, such as
+  a step onto a sidewalk or across an offset crossing, are just straight on:
+  no marks needed, and hounds follow them without thinking.
 * **Keep apart.** Trail never crosses or comes near itself, including the
   other sidewalk of a street it already ran: a checking hound could shortcut
   across, and the pack would see the hare. ``Footprint`` keeps track of where
@@ -25,6 +29,7 @@ COVER_M = 20.0        # one arrow covers a cluster of corners this close (sidewa
 STRAIGHT_DEG = 20.0   # the straight-on leg is at most this far off the incoming direction
 CLEAR_DEG = 20.0      # ...and every other leg is at least this much further off
 HEADING_M = 15.0      # direction of a street is measured over its first/last few metres
+JOG_M = 20.0          # two turns that cancel out within this distance are just straight on
 
 
 SIDEWALK_TAGS = {"sidewalk", "crossing", "traffic_island"}
@@ -153,6 +158,31 @@ class Geometry:
 
     def is_corner(self, prev, node) -> bool:
         return len(self.ways_on(prev, node)) >= 2
+
+
+def jog_corners(geo: Geometry, edges: list[tuple], cum) -> set[int]:
+    """Indices i (corner = ``edges[i][0]``) that sit inside a jog along a path.
+
+    A jog starts at a turn and ends at a later corner within ``JOG_M`` where
+    the way out lines up again with the way in (within ``STRAIGHT_DEG``).
+    """
+    out: set[int] = set()
+    n = len(edges)
+    for i in range(1, n):
+        if i in out:
+            continue
+        prev, node, nxt = edges[i - 1][0], edges[i][0], edges[i][1]
+        if geo.deviation(prev, node, nxt) <= STRAIGHT_DEG:
+            continue
+        a = geo.heading_in(prev, node)
+        for j in range(i + 1, n):
+            if cum[j] - cum[i] > JOG_M:
+                break
+            b = geo.heading_out(edges[j][0], edges[j][1])
+            if abs(math.degrees((b - a + math.pi) % (2 * math.pi) - math.pi)) <= STRAIGHT_DEG:
+                out.update(range(i, j + 1))
+                break
+    return out
 
 
 def turn_angle(geo: Geometry, prev, node, nxt) -> float:

@@ -242,29 +242,17 @@ window.addEventListener('load', function() {
 def _hare_path(trail: Trail, graph: StreetGraph, times, hare=None):
     """The hare's position at each replay time: trail plus each false out and back."""
     from .pack import HareProfile
-    from .sim import TrailModel
+    from .sim import TrailModel, hare_legs
 
     hare = hare or HareProfile()
     model = TrailModel(trail, graph)
-    legs, s_prev = [], 0.0
-    for c in model.checks:
-        for o in c.options:
-            if o.kind == "false":
-                legs += [(model.true, s_prev, c.s), (o.track, 0.0, o.false_s), (o.track, o.false_s, 0.0)]
-                s_prev = c.s
-    legs.append((model.true, s_prev, model.L))
-    t = -hare.head_start_s
-    timed = []
-    for track, a, b in legs:
-        dt_ = abs(b - a) * hare.pace_s_per_m
-        timed.append((track, a, b, t, t + dt_))
-        t += dt_
+    legs = hare_legs(model, hare.pace_s_per_m, hare.head_start_s)
     out = []
     for tt in times:
-        for track, a, b, t0, t1 in timed:
-            if tt <= t1:
-                f = 0.0 if t1 == t0 else max(0.0, (tt - t0) / (t1 - t0))
-                lon, lat = track.lonlat(a + (b - a) * f)
+        for l in legs:
+            if tt <= l.t1:
+                f = 0.0 if l.t1 == l.t0 else max(0.0, (tt - l.t0) / (l.t1 - l.t0))
+                lon, lat = l.track.lonlat(l.s0 + (l.s1 - l.s0) * f)
                 break
         else:
             lon, lat = model.true.lonlat(model.L)
