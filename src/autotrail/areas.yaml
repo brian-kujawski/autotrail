@@ -1,0 +1,18 @@
+# Map areas Autotrail can download. Add a new city by adding an entry here
+# (or in your own file passed with --areas-file). `places` is a list of
+# place names that OSMnx/Nominatim resolves to boundary polygons; the graph
+# covers their union.
+
+default: detroit
+
+areas:
+  detroit:
+    name: Detroit, Highland Park and Hamtramck
+    places:
+      - Detroit, Michigan, USA
+      - Highland Park, Michigan, USA
+      - Hamtramck, Michigan, USA
+    network_type: walk
+    # Join a dangling path end to another way within this many metres
+    # (the joining edge is flagged virtual). 0 turns stitching off.
+    stitch_tolerance_m: 5.0
