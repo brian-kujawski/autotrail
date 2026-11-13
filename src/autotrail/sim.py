@@ -1,29 +1,32 @@
-"""Tier 1 pack simulator: fast rule-based hounds on the street graph.
+"""Tier 1 pack simulator: rule-based hounds on the street graph.
 
 The simulation is event driven. A hound's plan is a short list of legs (run
 along a track from one distance to another, or wait), and the only events are
 "reached the end of the plan": a mark, a corner, a check, the give-up point,
-the end of a probe. On-On calls interrupt the plans of hounds that hear them.
+the end of a probe. Calls interrupt the plans of hounds that hear them.
 
-Everything a hound runs is a ``Track``: the true trail, a false branch, or a
-probe (a short run down an unmarked street and back). Tracks start at a node,
-so a hound's position is always (track, metres along it).
+Everything a hound runs is a ``Track``: the true trail, a false or a
+whichy-way's wrong leg, or a probe (a run down an unmarked street and back).
+Tracks start at a node, so a hound's position is always (track, metres along).
 
-Rules (see the design doc, "Tier 1"):
-  * Running: follow the trail; each blob is spotted with ``detect_prob``. More
-    than ``give_up_m`` without a mark: go back to the last mark and look again.
-  * Corners: if the trail goes straight on, hounds follow it. If it turns, a
-    hound spots the blob just past the corner with ``detect_prob``; otherwise
-    it runs straight on, finds nothing, and comes back. A hound that saw
-    another hound take the corner the right way within ``follow_s`` seconds
-    just follows (this is why the back of the pack runs close to true trail).
-  * Checks: hounds fan out over the directions the pack hasn't tried yet
-    (shared memory). Probes run ``check_search_m`` out and back; falses run
-    to the F mark and back. The hound that finds ``confirm_marks`` marks on
-    the true trail calls On-On; every hound at that check within
-    ``call_radius_m`` (straight line) runs to the caller. A solved check costs
-    late arrivals nothing: they go straight on.
-  * Done: reached the Beer Near.
+Rules (Brian's hash rules; see ``autotrail.rules`` for "straight on"):
+  * Running: follow the blobs; each is spotted with ``detect_prob`` (hares hide
+    them, and nobody sees one down a side street). More than ``give_up_m``
+    without a mark: go back to the last mark and look again.
+  * Corners: checks, arrows, whichy-ways and F marks are bold and never missed.
+    At a corner with none of them, a hound goes straight on. If trail really
+    turned there (poor marking) it runs out of marks, comes back, and tries
+    the other ways.
+  * Checks: the first hound picks a direction right away, the next a
+    different one, and so on until every direction is taken; later hounds
+    wait for a call. Probes run ``check_search_m`` out and back. Marks found
+    are called "On one", "On two", then "On-On" at the third
+    (``confirm_marks``); a whichy-way needs only one. On-On solves the check:
+    hounds within ``call_radius_m`` and every hound waiting at the check go
+    to the caller, and the check is marked so late arrivals go straight on.
+    A false with three marks fools hounds the same way, until someone finds
+    the F; then the false is scratched and the check is open again.
+  * Done: reached the Beer Near. The return leg isn't simulated yet.
 
 ``CheckPolicy`` and ``CallModel`` are the extension points for smarter hounds
 and noise-limited calling (phase 5).
@@ -42,55 +45,12 @@ import numpy as np
 
 from .graph import StreetGraph
 from .pack import HoundProfile, default_pack
+from .rules import COVER_M, Geometry
 from .trail import BranchPurpose, MarkKind, Trail
 
 MAX_SIM_S = 4 * 3600.0
 PROBE_MAX_M = 400.0
-
-
-# ---------------------------------------------------------------- geometry
-
-class Geometry:
-    """Cached metric geometry of graph edges and node bearings."""
-
-    def __init__(self, graph: StreetGraph):
-        self.g = graph
-        self._edge: dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
-        self._node_xy: dict = {}
-
-    def node_xy(self, n) -> tuple[float, float]:
-        p = self._node_xy.get(n)
-        if p is None:
-            p = self._node_xy[n] = self.g.to_metres(*self.g.node_lonlat(n))
-        return p
-
-    def bearing(self, a, b) -> float:
-        ax, ay = self.node_xy(a)
-        bx, by = self.node_xy(b)
-        return math.atan2(by - ay, bx - ax)
-
-    def edge_poly(self, e: tuple):
-        """(cum distance scaled to graph length, x, y, lon, lat) along edge e."""
-        hit = self._edge.get(e)
-        if hit is None:
-            line = self.g.edge_line(*e)
-            lon, lat = (np.asarray(a, dtype=float) for a in line.xy)
-            x, y = self.g._fwd.transform(lon, lat)
-            x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
-            seg = np.hypot(np.diff(x), np.diff(y))
-            cum = np.concatenate([[0.0], np.cumsum(seg)])
-            length = self.g.edge_length(*e)
-            cum = cum * (length / cum[-1]) if cum[-1] > 0 else np.linspace(0, length, len(cum))
-            hit = self._edge[e] = (cum, x, y, lon, lat)
-        return hit
-
-
-def turn_angle(geo: Geometry, prev, node, nxt) -> float:
-    """Absolute turn in radians going prev -> node -> nxt (0 = straight on)."""
-    a = geo.bearing(prev, node)
-    b = geo.bearing(node, nxt)
-    d = (b - a + math.pi) % (2 * math.pi) - math.pi
-    return abs(d)
+CALLS = {1: "On one", 2: "On two"}
 
 
 class Track:
@@ -125,9 +85,6 @@ class Track:
         s = np.asarray(s, dtype=float)
         return np.interp(s, self._s, self._p[:, 2]), np.interp(s, self._s, self._p[:, 3])
 
-    def node_s(self) -> list[float]:
-        return [float(c) for c in self.cum]
-
 
 # ---------------------------------------------------------------- compiled trail
 
@@ -136,7 +93,7 @@ class Option:
     kind: str              # "true", "false", "probe"
     nb: object             # neighbour node the option heads to
     track: Track | None = None
-    false_s: float = 0.0   # where the F mark is on a false branch
+    false_s: float = 0.0   # where the F mark is on a false or wrong leg
 
 
 @dataclass
@@ -145,34 +102,46 @@ class Check:
     s: float
     node: object
     gap_end: float                      # first mark after the check on the true trail
+    kind: str = "check"                 # "check" or "whichy"
+    confirm: int | None = None          # marks needed to call On-On (None: the hound's own)
+    fake: bool = False                  # trail goes straight on
     options: list[Option] = field(default_factory=list)
     # per-run state
-    solved: bool = False
     solved_t: float | None = None
-    claimed: set = field(default_factory=set)
+    pointer: int | None = None          # the way the check is marked (after an On-On)
+    claimed: dict = field(default_factory=dict)   # option -> number of hounds on it
     dead: set = field(default_factory=set)
+    waiters: list = field(default_factory=list)
     arrivals: dict = field(default_factory=dict)  # hound idx -> first arrival time
 
+    @property
+    def solved(self) -> bool:
+        return self.solved_t is not None
+
+    @property
+    def label(self) -> str:
+        return ("whichy-way " if self.kind == "whichy" else "check ") + str(self.idx + 1)
+
     def reset(self) -> None:
-        self.solved, self.solved_t = False, None
-        self.claimed, self.dead, self.arrivals = set(), set(), {}
+        self.solved_t, self.pointer = None, None
+        self.claimed, self.dead, self.waiters, self.arrivals = {}, set(), [], {}
 
 
 @dataclass
 class Junction:
+    """A corner on the true trail that matters: an arrow, or an unmarked turn."""
     s: float
     node: object
-    straight_correct: bool
-    visible: bool              # a mark within sight_m past the corner
-    wrong: list                # neighbour nodes that are not the trail
-    straightest_wrong: object  # where a hound that misses the turn goes
-    last_t: float | None = None  # per run: when a hound last went the right way here
+    nxt: object
+    arrow: bool
+    straight: object     # where an unmarked corner sends a hound (None: unclear)
+    ways: list           # every way on except back
 
 
 class TrailModel:
     """A Trail compiled for fast simulation."""
 
-    def __init__(self, trail: Trail, graph: StreetGraph, sight_m: float = 40.0):
+    def __init__(self, trail: Trail, graph: StreetGraph):
         self.trail, self.g = trail, graph
         self.geo = Geometry(graph)
         self.warnings: list[str] = []
@@ -183,67 +152,83 @@ class TrailModel:
         self.true = self._track("true", tp, label="true trail")
         self.L = self.true.length
         cum = self.true.cum
+        nodes_along = [(float(cum[i]), e[0], i) for i, e in enumerate(tp)][1:]
         node_s = {}  # node -> first s on the true path
-        for i, e in enumerate(tp):
-            node_s.setdefault(e[0], float(cum[i]))
-        node_s.setdefault(tp[-1][1], float(cum[-1]))
+        turn_s = {}  # (node, next node) -> s: tells apart two passes through one node
+        for s, n, i in nodes_along:
+            node_s.setdefault(n, s)
+            turn_s.setdefault((n, tp[i][1]), s)
 
-        fwd_idx: dict[tuple, list[int]] = {}
-        rev_idx: dict[tuple, list[int]] = {}
+        fwd_idx: dict[tuple, int] = {}
+        rev_idx: dict[tuple, int] = {}
         for i, e in enumerate(tp):
-            fwd_idx.setdefault(e, []).append(i)
-            rev_idx.setdefault((e[1], e[0]), []).append(i)
+            fwd_idx.setdefault(e, i)
+            rev_idx.setdefault((e[1], e[0]), i)
 
         def true_s(m) -> float | None:
             at = m.at
             if at.edge is not None:
                 e = (at.edge.u, at.edge.v, at.edge.key)
                 if e in fwd_idx:
-                    return float(cum[fwd_idx[e][0]] + at.offset_m)
+                    return float(cum[fwd_idx[e]] + at.offset_m)
                 if (e[0], e[1]) in rev_idx:
-                    i = rev_idx[(e[0], e[1])][0]
+                    i = rev_idx[(e[0], e[1])]
                     return float(cum[i] + max(0.0, graph.edge_length(*tp[i]) - at.offset_m))
                 return None
+            to = m.params.get("to")
+            if to is not None and (at.node, to) in turn_s:
+                return turn_s[(at.node, to)]
             return node_s.get(at.node)
 
-        # Branches, and marks on them.
-        branch_tracks: list[tuple[Track, object]] = []
-        branch_edge: dict[tuple, tuple[Track, int]] = {}
+        def snap_node(s: float):
+            """Nearest corner node along the true path: (s, node, edge index leaving it)."""
+            return min(nodes_along, key=lambda t: abs(t[0] - s)) if nodes_along else None
+
+        # Side legs (falses and whichy-way wrong legs), and marks on them.
+        side: list[tuple[Track, object]] = []
+        side_edge: dict[tuple, tuple[Track, int]] = {}
         for b in trail.branches:
             if b.purpose != BranchPurpose.FALSE:
                 self.warnings.append(f"{b.purpose.value.title()} branches are phase 2; ignored by the sim")
                 continue
             be = [(e.u, e.v, e.key) for e in b.edges]
             t = self._track("false", be, label=b.label or "false")
-            branch_tracks.append((t, b.from_node))
+            side.append((t, b.from_node))
             for i, e in enumerate(be):
-                branch_edge.setdefault(e, (t, i))
+                side_edge.setdefault(e, (t, i))
 
         blobs: list[float] = []
-        branch_blobs: dict[int, list[float]] = {}
-        branch_false: dict[int, float] = {}
-        check_s: list[float] = []
+        side_blobs: dict[int, list[float]] = {}
+        side_f: dict[int, float] = {}
+        check_specs: list[tuple[float, str, dict]] = []
+        arrow_s: set[float] = set()
         skipped: dict[str, int] = {}
         for m in trail.marks:
             if m.params.get("leg") == "return":
                 continue
             s = true_s(m)
-            on_branch = None
+            on_side = None
             if s is None and m.at.edge is not None:
                 e = (m.at.edge.u, m.at.edge.v, m.at.edge.key)
-                if e in branch_edge:
-                    t, i = branch_edge[e]
-                    on_branch = (t, float(t.cum[i] + m.at.offset_m))
-            if m.kind in (MarkKind.BLOB, MarkKind.ARROW):
+                if e in side_edge:
+                    t, i = side_edge[e]
+                    on_side = (t, float(t.cum[i] + m.at.offset_m))
+            if m.kind == MarkKind.BLOB:
                 if s is not None:
                     blobs.append(s)
-                elif on_branch:
-                    branch_blobs.setdefault(on_branch[0].tid, []).append(on_branch[1])
-            elif m.kind == MarkKind.CHECK and s is not None:
-                check_s.append(s)
-            elif m.kind == MarkKind.FALSE and on_branch:
-                t, bs = on_branch
-                branch_false[t.tid] = min(branch_false.get(t.tid, math.inf), bs)
+                elif on_side:
+                    side_blobs.setdefault(on_side[0].tid, []).append(on_side[1])
+            elif m.kind == MarkKind.ARROW and s is not None:
+                snapped = snap_node(s)
+                if snapped and abs(snapped[0] - s) <= 30.0:
+                    arrow_s.add(snapped[0])
+                else:
+                    blobs.append(s)
+            elif m.kind in (MarkKind.CHECK, MarkKind.WHICHY_WAY) and s is not None:
+                check_specs.append((s, "whichy" if m.kind == MarkKind.WHICHY_WAY else "check", m.params))
+            elif m.kind == MarkKind.FALSE and on_side:
+                t, bs = on_side
+                side_f[t.tid] = min(side_f.get(t.tid, math.inf), bs)
             elif m.kind == MarkKind.BEER:
                 continue
             else:
@@ -251,64 +236,70 @@ class TrailModel:
         for k, n in skipped.items():
             self.warnings.append(f"{n} {k} mark(s) not simulated yet (phase 2 marks, or off the trail)")
         self.blobs = sorted(blobs)
-        self.branch_blobs = {k: sorted(v) for k, v in branch_blobs.items()}
+        self.side_blobs = {k: sorted(v) for k, v in side_blobs.items()}
 
-        # Checks snap to the nearest node of the true path.
-        nodes_along = [(float(cum[i]), e[0]) for i, e in enumerate(tp)][1:]
+        # Checks and whichy-ways snap to the nearest corner of the true path.
         self.checks: list[Check] = []
-        used_nodes = set()
-        for s in sorted(check_s):
-            if not nodes_along:
-                break
-            cs, cn = min(nodes_along, key=lambda t: abs(t[0] - s))
-            if cn in used_nodes:
+        used = set()
+        for s, kind, params in sorted(check_specs, key=lambda t: t[0]):
+            snapped = snap_node(s)
+            if snapped is None or snapped[1] in used:
                 continue
-            used_nodes.add(cn)
-            i = bisect.bisect_right(self.blobs, cs + 0.5)
-            gap_end = self.blobs[i] if i < len(self.blobs) else self.L
-            self.checks.append(Check(len(self.checks), cs, cn, gap_end))
-        self.check_at = {c.s: c for c in self.checks}
-
-        # Options at each check.
-        idx_at_s = {float(cum[i]): i for i in range(len(tp))}
-        for c in self.checks:
-            i = idx_at_s[c.s]
+            cs, cn, i = snapped
+            used.add(cn)
+            j = bisect.bisect_right(self.blobs, cs + 0.5)
+            gap_end = self.blobs[j] if j < len(self.blobs) else self.L
             prev, nxt = tp[i - 1][0], tp[i][1]
+            c = Check(0, cs, cn, gap_end, kind=kind, confirm=1 if kind == "whichy" else None,
+                      fake=self.geo.straight_on(prev, cn) == nxt)
             opts = [Option("true", nxt)]
-            false_nbs = set()
-            for t, frm in branch_tracks:
-                if frm == c.node:
-                    fs = branch_false.get(t.tid, t.length)
-                    opts.append(Option("false", t.edges[0][1], t, min(fs, t.length)))
-                    false_nbs.add(t.edges[0][1])
-            for nb in self._neighbours(c.node):
-                if nb in (prev, nxt) or nb in false_nbs:
-                    continue
-                opts.append(Option("probe", nb))
+            side_nbs = set()
+            for t, frm in side:
+                if frm == cn:
+                    opts.append(Option("false", t.edges[0][1], t, min(side_f.get(t.tid, t.length), t.length)))
+                    side_nbs.add(t.edges[0][1])
+            if kind == "check":
+                for nb in self.geo.ways_on(prev, cn):
+                    if nb != nxt and nb not in side_nbs:
+                        opts.append(Option("probe", nb))
             c.options = opts
-        for t, frm in branch_tracks:
-            if frm not in used_nodes:
-                self.warnings.append(f"false '{t.label}' doesn't start at a check; ignored by the sim")
+            self.checks.append(c)
+        self.checks.sort(key=lambda c: c.s)
+        for k, c in enumerate(self.checks):
+            c.idx = k
+        self.check_at = {c.s: c for c in self.checks}
+        self.check_s = [c.s for c in self.checks]
+        for t, frm in side:
+            if frm not in used:
+                self.warnings.append(f"'{t.label}' doesn't start at a check or whichy-way; ignored by the sim")
+        # The hare runs every false and wrong leg out to its F and back.
+        self.side_detours = [(c.s, 2 * o.false_s) for c in self.checks for o in c.options if o.kind == "false"]
 
-        # Corners along the true path (not at checks).
+        # Corners that matter: arrows (marks to count) and unmarked turns (where hounds go wrong).
         self.junctions: list[Junction] = []
-        for i in range(1, len(tp)):
-            node = tp[i][0]
-            s = float(cum[i])
+        self.unmarked_turns: list[float] = []
+        self.arrow_nodes: list = []
+        last_mark = -math.inf
+        for s, node, i in nodes_along:
             if s in self.check_at:
+                last_mark = s
                 continue
             prev, nxt = tp[i - 1][0], tp[i][1]
-            nbs = [nb for nb in self._neighbours(node) if nb != prev]
-            wrong = [nb for nb in nbs if nb != nxt]
-            if not wrong:
-                continue
-            straightest = min(nbs, key=lambda nb: turn_angle(self.geo, prev, node, nb))
-            j = bisect.bisect_right(self.blobs, s + 0.01)
-            visible = j < len(self.blobs) and self.blobs[j] - s <= sight_m
-            sw = min(wrong, key=lambda nb: turn_angle(self.geo, prev, node, nb))
-            self.junctions.append(Junction(s, node, straightest == nxt, visible, wrong, sw))
+            ways = self.geo.ways_on(prev, node)
+            arrow = s in arrow_s
+            straight = self.geo.straight_on(prev, node) if ways else None
+            if arrow:
+                self.arrow_nodes.append(node)
+                last_mark = s
+            elif straight == nxt or not ways or s - last_mark <= COVER_M:
+                continue  # straight on, or the same street corner as the last mark
+            else:
+                self.unmarked_turns.append(s)
+            self.junctions.append(Junction(s, node, nxt, arrow, straight, ways))
         self.junction_s = [j.s for j in self.junctions]
-        self.check_s = [c.s for c in self.checks]
+        if self.unmarked_turns:
+            self.warnings.append(f"{len(self.unmarked_turns)} turn(s) with no check, arrow or whichy-way: "
+                                 "hounds will go straight on there")
         if not self.blobs:
             self.warnings.append("no blobs on the true trail: hounds will get lost (add marks first)")
 
@@ -318,16 +309,11 @@ class TrailModel:
         self._next_tid += 1
         return t
 
-    def _neighbours(self, node) -> list:
-        G = self.g.G
-        return [nb for nb in G.successors(node) if nb != node]
-
     def probe(self, node, nb) -> Track:
         """Unmarked run from node via nb, going straight on at each corner."""
         key = (node, nb)
         t = self._probes.get(key)
         if t is None:
-            G = self.g.G
             edges = []
             total = 0.0
             prev, cur = node, nb
@@ -339,33 +325,33 @@ class TrailModel:
                 seen.add(cur)
                 if total >= PROBE_MAX_M:
                     break
-                nxts = [n for n in G.successors(cur) if n != prev and n != cur and n not in seen]
-                if not nxts:
+                ways = [n for n in self.geo.ways_on(prev, cur) if n not in seen]
+                if not ways:
                     break
-                p = prev
-                prev, cur = cur, min(nxts, key=lambda n: turn_angle(self.geo, p, cur, n))
+                nxt = self.geo.straight_on(prev, cur)
+                if nxt is None or nxt in seen:
+                    nxt = min(ways, key=lambda n, p=prev, c=cur: self.geo.deviation(p, c, n))
+                prev, cur = cur, nxt
             t = self._probes[key] = self._track("probe", edges, label=f"probe {node}->{nb}")
         return t
 
     def reset(self) -> None:
         for c in self.checks:
             c.reset()
-        for j in self.junctions:
-            j.last_t = None
 
 
 # ---------------------------------------------------------------- extension points
 
 class CheckPolicy(Protocol):
-    def choose(self, hound: "Hound", check: Check, candidates: list[int], rng: random.Random) -> int: ...
+    def choose(self, hound: "Hound", check: Check, free: list[int], rng: random.Random) -> int | None:
+        """Pick a direction from the untaken ones, or None to wait for a call."""
 
 
-class RandomUnexplored:
-    """Tier 1: any direction the pack hasn't claimed yet, at random."""
+class FirstHoundsCheck:
+    """Tier 1: each hound takes a direction nobody has; once all are taken, wait for a call."""
 
-    def choose(self, hound, check, candidates, rng):
-        fresh = [i for i in candidates if i not in check.claimed]
-        return rng.choice(fresh or candidates)
+    def choose(self, hound, check, free, rng):
+        return rng.choice(free) if free else None
 
 
 class CallModel(Protocol):
@@ -374,7 +360,7 @@ class CallModel(Protocol):
 
 @dataclass
 class RadiusCall:
-    """Tier 1: everyone within a straight-line radius hears On-On."""
+    """Tier 1: everyone within a straight-line radius hears a call."""
     radius_m: float = 150.0
 
     def hears(self, caller_xy, hound_xy):
@@ -410,6 +396,7 @@ class Hound:
     tried: set = field(default_factory=set)
     found: int = 0
     heading: bool = False
+    waiting: bool = False
     opt: int = 0
     done_t: float | None = None
     events: list[tuple[float, str]] = field(default_factory=list)
@@ -441,6 +428,7 @@ class CheckResult:
     idx: int
     s: float
     node: object
+    kind: str
     first_arrival_s: float | None
     last_arrival_s: float | None
     solved_s: float | None
@@ -454,7 +442,9 @@ class SimResult:
     true_trail_m: float
     hounds: list[HoundResult]
     checks: list[CheckResult]
-    gap_profile: list[tuple[float, float]]  # (metres along trail, front-to-back seconds)
+    gap_profile: list[tuple[float, float]]    # (metres along trail, front-to-back seconds)
+    front_profile: list[tuple[float, float]]  # (metres along trail, when the first hound got there)
+    side_detours: list[tuple[float, float]]   # (metres along trail, metres the hare runs out and back)
     seed: int
     raw: list[Hound] = field(default_factory=list, repr=False)
 
@@ -469,15 +459,17 @@ class Simulation:
     def __init__(self, model: TrailModel, pack: list[HoundProfile], seed: int = 0,
                  policy: CheckPolicy | None = None, calls: CallModel | None = None):
         self.m, self.pack, self.seed = model, pack, seed
-        self.policy = policy or RandomUnexplored()
+        self.policy = policy or FirstHoundsCheck()
         self.calls = calls or RadiusCall()
         self.rng = random.Random(seed)
         self.heap: list = []
         self._seq = 0
+        self.now = 0.0
 
     # -- plumbing
     def go(self, h: Hound, legs: list[tuple], then: Callable[[Hound], None]) -> None:
         """Queue legs [(track, s0, s1) or (track, s, s, wait_s)] and call ``then`` at the end."""
+        h.waiting = False
         h.plan_i = len(h.legs)
         h.plan_start = (h.track, h.s)
         t = h.t
@@ -495,6 +487,15 @@ class Simulation:
         heapq.heappush(self.heap, (t, self._seq, h.idx, h.version, then))
 
     def interrupt(self, h: Hound, t: float) -> None:
+        if h.waiting:
+            # Standing at the check since h.t: record the wait.
+            if t > h.t:
+                h.legs.append(Leg(h.track, h.s, h.s, h.t, t))
+            h.plan_i = len(h.legs)
+            h.plan_start = (h.track, h.s)
+            h.t, h.waiting = t, False
+            h.version += 1
+            return
         keep = []
         for l in h.legs[h.plan_i:]:
             if l.t1 <= t:
@@ -527,56 +528,65 @@ class Simulation:
             if i < len(m.junction_s):
                 stops.append((m.junction_s[i], self.at_junction))
             if h.check is not None:
-                # Search out from the check; each mark found buys another give_up_m.
+                # Searching out from a check; each mark found buys another give_up_m.
                 reach = max(p.check_search_m, h.check.gap_end - h.check.s + 20.0)
                 limit = max(h.check.s + reach, h.last_seen + p.give_up_m)
             else:
                 limit = h.last_seen + p.give_up_m
-            if limit > s + 1e-6:
-                stops.append((limit, self.at_give_up))
-            else:
-                stops.append((s, self.at_give_up))
-        else:  # a false branch
-            c = h.check
-            opt = c.options[h.opt]
+            stops.append((max(limit, s), self.at_give_up))
+        else:  # a false or a whichy-way's wrong leg
+            opt = h.check.options[h.opt]
             stops = [(opt.false_s, self.at_false)]
-            bl = m.branch_blobs.get(T.tid, [])
+            bl = m.side_blobs.get(T.tid, [])
             i = bisect.bisect_right(bl, s + 1e-6)
             if i < len(bl) and bl[i] < opt.false_s:
                 stops.append((bl[i], self.at_blob))
-        # Ties: checks and the end beat corners and blobs at the same spot.
-        order = {self.at_end: 0, self.at_check: 1, self.at_false: 1, self.at_blob: 2,
-                 self.at_junction: 3, self.at_give_up: 4}
+        order = {self.at_end: 0, self.at_check: 1, self.at_false: 1, self.at_junction: 2,
+                 self.at_blob: 3, self.at_give_up: 4}
         stop, fn = min(stops, key=lambda x: (x[0], order[x[1]]))
         self.go(h, [(T, s, stop)], fn)
 
-    def detects(self, h: Hound) -> bool:
-        if h.careful:
+    def confirm_needed(self, h: Hound) -> int:
+        c = h.check
+        return c.confirm if c is not None and c.confirm is not None else h.prof.confirm_marks
+
+    def found_mark(self, h: Hound) -> bool:
+        """Count a mark found past a check. Returns True if the hound called On-On."""
+        if h.check is None or h.heading:
+            return False
+        h.found += 1
+        need = self.confirm_needed(h)
+        if h.found >= need:
+            self.call_on_on(h)
             return True
-        return self.rng.random() < h.prof.detect_prob
+        if h.found > 0:
+            self.log(h, CALLS.get(h.found, f"On {h.found}"))
+        return False
 
     def at_blob(self, h: Hound) -> None:
-        if self.detects(h):
+        if h.careful or self.rng.random() < h.prof.detect_prob:
             h.careful = False
             if h.track is self.m.true:
                 h.last_seen = h.s
-            if h.check is not None and not h.heading:
-                h.found += 1
-                if h.found >= h.prof.confirm_marks:
-                    self.call_on_on(h)
-                    return
+            if self.found_mark(h):
+                return
         self.run(h)
 
     def at_end(self, h: Hound) -> None:
         h.done_t = h.t
-        h.check = None
         self.log(h, "beer near")
+        if h.check is not None and not h.heading:
+            # Reached the Beer Near from a check before the third mark: that solves it.
+            self.call_on_on(h)
+        h.check = None
 
     def at_give_up(self, h: Hound) -> None:
-        if h.check is not None:
-            # Searched this direction from the check without enough marks.
+        c = h.check
+        if c is not None:
+            # Searched this way from the check without enough marks.
             self.log(h, "nothing this way")
-            self.go(h, [(h.track, h.s, h.check.s)], self.choose)
+            self.release(c, h.opt)
+            self.go(h, [(h.track, h.s, c.s)], self.choose)
             return
         if h.careful:
             # Looked again and still nothing: a gap in the marking. Push on.
@@ -591,27 +601,29 @@ class Simulation:
     # -- corners
     def at_junction(self, h: Hound) -> None:
         j = self.m.junctions[bisect.bisect_left(self.m.junction_s, h.s - 1e-6)]
-        following = j.last_t is not None and h.t - j.last_t <= h.prof.follow_s
-        if j.straight_correct or following or (j.visible and self.detects(h)):
-            j.last_t = h.t
+        if j.arrow:
+            h.last_seen = h.s
             h.careful = False
+            if self.found_mark(h):
+                return
             self.run(h)
             return
-        self.wrong_turn(h, j, j.straightest_wrong, {j.straightest_wrong},
-                        max(30.0, h.prof.give_up_m - (j.s - h.last_seen)))
+        # An unmarked corner where trail turns: go straight on (or guess, if there's no straight).
+        way = j.straight if j.straight is not None else self.rng.choice(j.ways)
+        if way == j.nxt:
+            self.run(h)
+            return
+        self.wrong_turn(h, j, way, {way}, max(30.0, h.prof.give_up_m - (j.s - h.last_seen)))
 
     def wrong_turn(self, h: Hound, j: Junction, nb, tried: set, length: float) -> None:
         pr = self.m.probe(j.node, nb)
         out = min(length, pr.length)
-        self.log(h, "wrong turn")
+        self.log(h, "no marks this way")
 
         def back(hh: Hound, j=j, tried=tried) -> None:
             hh.track, hh.s = self.m.true, j.s
-            left = [n for n in j.wrong if n not in tried]
-            following = j.last_t is not None and hh.t - j.last_t <= hh.prof.follow_s
-            if (following or (j.visible and self.detects(hh)) or not left
-                    or self.rng.random() < 1.0 / (len(left) + 1)):
-                j.last_t = hh.t
+            left = [n for n in j.ways if n not in tried and n != j.nxt]
+            if not left or self.rng.random() < 1.0 / (len(left) + 1):
                 hh.careful = True
                 self.run(hh)
                 return
@@ -622,33 +634,64 @@ class Simulation:
 
     # -- checks
     def at_check(self, h: Hound) -> None:
-        c = self.m.check_at[h.s] if h.s in self.m.check_at else min(
-            self.m.checks, key=lambda c: abs(c.s - h.s))
+        c = self.m.check_at[h.s]
+        if h.check is not None and h.check is not c and not h.heading and h.track is self.m.true:
+            # Missed a blob but reached the next check: that's trail, so the last check is solved.
+            self.call_on_on(h, resume=False)
         c.arrivals.setdefault(h.idx, h.t)
         h.last_seen = c.s
         h.careful = False
-        if c.solved:
-            self.run(h)
-            return
-        self.log(h, f"check {c.idx + 1}")
         h.check, h.tried, h.found = c, set(), 0
+        if c.pointer is not None:
+            self.follow_pointer(h)
+            return
+        self.log(h, c.label)
         self.go(h, [(self.m.true, c.s, c.s, h.prof.check_pause_s)], self.choose)
+
+    def follow_pointer(self, h: Hound) -> None:
+        """The check is marked: go the way it points."""
+        c = h.check
+        h.opt = c.pointer
+        opt = c.options[c.pointer]
+        h.found = -10**6  # following, not checking: no calls
+        if opt.kind == "true":
+            h.check = None
+            h.track, h.s, h.last_seen = self.m.true, c.s, c.s
+        else:
+            h.track, h.s = opt.track, 0.0
+        self.run(h)
+
+    def release(self, c: Check, i: int) -> None:
+        """A hound is done with direction i; if nobody else is on it, a waiter can take it."""
+        n = c.claimed.get(i, 0) - 1
+        if n > 0:
+            c.claimed[i] = n
+        else:
+            c.claimed.pop(i, None)
+        if c.waiters and i not in c.dead and i not in c.claimed:
+            w = c.waiters.pop(0)
+            self.interrupt(w, self.now)
+            self.choose(w)
 
     def choose(self, h: Hound) -> None:
         c = h.check
-        h.track, h.s, h.found, h.heading = self.m.true, c.s, 0, False
-        if c.solved:
-            h.check = None
-            h.last_seen = c.s
-            self.run(h)
+        h.track, h.s, h.heading = self.m.true, c.s, False
+        h.found = 0
+        if c.pointer is not None:
+            self.follow_pointer(h)
             return
         n = len(c.options)
-        cands = [i for i in range(n) if i not in c.dead and i not in h.tried]
-        if not cands:
+        free = [i for i in range(n) if i not in c.dead and i not in c.claimed and i not in h.tried]
+        if not free and all(i in c.dead or i in h.tried for i in range(n)):
+            # Tried everything open to me (maybe missed a blob): start over on what's not scratched.
             h.tried = set()
-            cands = [i for i in range(n) if i not in c.dead] or [0]
-        i = self.policy.choose(h, c, cands, self.rng)
-        c.claimed.add(i)
+            free = [i for i in range(n) if i not in c.dead and i not in c.claimed]
+        i = self.policy.choose(h, c, free, self.rng)
+        if i is None:
+            h.waiting = True
+            c.waiters.append(h)
+            return
+        c.claimed[i] = c.claimed.get(i, 0) + 1
         h.tried.add(i)
         h.opt = i
         opt = c.options[i]
@@ -664,64 +707,85 @@ class Simulation:
 
             def back(hh: Hound, i=i) -> None:
                 hh.check.dead.add(i)
+                self.release(hh.check, i)
                 self.go(hh, [(self.m.true, hh.check.s, hh.check.s, hh.prof.check_pause_s / 2)], self.choose)
 
             self.go(h, [(pr, 0.0, out), (pr, out, 0.0)], back)
 
     def at_false(self, h: Hound) -> None:
         c = h.check
-        c.dead.add(h.opt)
-        self.log(h, "false")
+        i = h.opt
+        if i not in c.dead:
+            self.log(h, "F! back to the check")
+        c.dead.add(i)
+        if c.pointer == i:
+            c.pointer = None  # scratch the arrow at the check
+        self.release(c, i)
         self.go(h, [(h.track, h.s, 0.0)], self.choose)
 
-    def call_on_on(self, h: Hound) -> None:
+    def call_on_on(self, h: Hound, resume: bool = True) -> None:
+        """h calls On-On for its check. With ``resume`` False, the caller moves h on itself."""
         c, t = h.check, h.t
         on_true = h.track is self.m.true
-        self.log(h, "On-On!" if on_true else "On-On! (down a false)")
+        self.log(h, f"On-On! ({c.label})" if on_true else f"On-On! (down a false, {c.label})")
+        h.found = -10**6  # one call is enough
+        if c.solved:
+            # Already solved and marked: the pack has gone; nobody follows this one.
+            if on_true:
+                h.check = None
+            if resume and h.done_t is None:
+                self.run(h)
+            return
+        c.pointer = h.opt
         if on_true:
-            c.solved, c.solved_t = True, t
+            c.solved_t = t
+            c.claimed.clear()
             h.check = None
         cx, cy = (float(v) for v in h.track.xy(h.s))
         target_track, target_s = h.track, h.s
+        waiters = list(c.waiters)
+        c.waiters.clear()
         for k in self.hounds:
             if k is h or k.check is not c or k.done_t is not None or k.heading:
                 continue
-            kt, ks = k.pos_at(t)
-            kx, ky = (float(v) for v in kt.xy(ks))
-            if not self.calls.hears((cx, cy), (kx, ky)):
-                continue
-            self.interrupt(k, t)
-            legs = []
-            if k.track is self.m.true:
-                if on_true and k.s >= c.s:
-                    # Already heading out the right way.
-                    k.check = None
-                    k.last_seen = max(k.last_seen, c.s)
-                    self.run(k)
+            if k not in waiters:
+                kt, ks = k.pos_at(t)
+                kx, ky = (float(v) for v in kt.xy(ks))
+                if not self.calls.hears((cx, cy), (kx, ky)):
                     continue
-                legs.append((self.m.true, k.s, c.s))
+            self.interrupt(k, t)
+            if k.track is self.m.true and on_true and k.s >= c.s:
+                # Already out the right way.
+                k.check = None
+                k.last_seen = max(k.last_seen, c.s)
+                k.found = -10**6
+                self.run(k)
+                continue
+            if k not in waiters and k.opt in c.claimed:
+                self.release(c, k.opt)  # nobody is waiting now, so this wakes no one
+            if k.track is target_track and k.s >= target_s:
+                legs = []
+            elif k.track is target_track:
+                legs = [(k.track, k.s, target_s)]
             else:
-                legs.append((k.track, k.s, 0.0))
-            start = c.s if on_true else 0.0
-            legs.append((target_track, start, target_s))
+                legs = [(k.track, k.s, 0.0)] if k.track is not self.m.true else [(self.m.true, k.s, c.s)]
+                legs.append((target_track, c.s if on_true else 0.0, target_s))
             k.heading = True
-            if not on_true:
-                k.opt = h.opt
+            k.opt = h.opt
 
             def arrive(kk: Hound, on_true=on_true, ts=target_s) -> None:
                 kk.heading = False
+                kk.found = -10**6  # following a call: don't call again
                 if on_true:
                     kk.check = None
                     kk.last_seen = ts
-                else:
-                    kk.found = -10**6  # following a call: don't call again
                 self.run(kk)
 
-            self.go(k, legs, arrive)
-        if on_true:
-            self.run(h)
-        else:
-            h.found = -10**6  # don't call again on this branch
+            if legs:
+                self.go(k, legs, arrive)
+            else:
+                arrive(k)
+        if resume and h.done_t is None:
             self.run(h)
 
     # -- main loop
@@ -741,7 +805,11 @@ class Simulation:
                 continue
             if t > MAX_SIM_S:
                 break
+            self.now = t
             fn(h)
+        for h in self.hounds:
+            if h.waiting and h.done_t is None:
+                self.interrupt(h, max(self.now, h.t))
         return self._result()
 
     def _result(self) -> SimResult:
@@ -750,9 +818,8 @@ class Simulation:
         for h in self.hounds:
             d = h.distance()
             hounds.append(HoundResult(h.prof.name, h.pace, h.prof.role, h.done_t, d, d - m.L))
-        # First passage times along the true trail.
         sample_s = np.arange(0.0, m.L, 100.0)
-        extra = sorted({c.s for c in m.checks} | {c.gap_end for c in m.checks})
+        extra = sorted({c.s for c in m.checks} | {c.gap_end for c in m.checks} | {m.L})
         targets = np.array(sorted(set(sample_s.tolist()) | set(extra)))
         fp = np.vstack([first_passage(h, m.true, targets) for h in self.hounds])
         col = {float(s): i for i, s in enumerate(targets)}
@@ -767,11 +834,18 @@ class Simulation:
             arr = sorted(c.arrivals.values())
             first = arr[0] if arr else None
             checks.append(CheckResult(
-                c.idx, c.s, c.node, first, arr[-1] if arr else None, c.solved_t,
+                c.idx, c.s, c.node, c.kind, first, arr[-1] if arr else None, c.solved_t,
                 (c.solved_t - first) if (c.solved_t is not None and first is not None) else None,
                 spread(c.s), spread(c.gap_end)))
         gap_profile = [(float(s), g) for s in sample_s if (g := spread(s)) is not None]
-        return SimResult(m.L, hounds, checks, gap_profile, self.seed, raw=self.hounds)
+        front = []
+        for i, s in enumerate(targets):
+            v = fp[:, i]
+            v = v[~np.isnan(v)]
+            if len(v):
+                front.append((float(s), float(v.min())))
+        return SimResult(m.L, hounds, checks, gap_profile, front, list(m.side_detours), self.seed,
+                         raw=self.hounds)
 
 
 def first_passage(h: Hound, track: Track, targets: np.ndarray) -> np.ndarray:

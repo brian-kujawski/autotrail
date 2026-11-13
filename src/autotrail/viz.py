@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import folium
@@ -13,11 +14,11 @@ from .trail import METRES_PER_MILE, MarkKind, Trail, _path_coords, _pos_lonlat
 # (colour, short label) for each mark kind.
 MARK_STYLE = {
     MarkKind.BLOB: ("#444444", "o"),
-    MarkKind.ARROW: ("#444444", ">"),
+    MarkKind.ARROW: ("#1f77b4", "&#10148;"),
     MarkKind.CHECK: ("#d62728", "X"),
     MarkKind.BACKCHECK: ("#9467bd", "BC"),
     MarkKind.FALSE: ("#000000", "F"),
-    MarkKind.WHICHY_WAY: ("#ff7f0e", "?"),
+    MarkKind.WHICHY_WAY: ("#ff7f0e", "Y"),
     MarkKind.SPLIT: ("#2ca02c", "T/E"),
     MarkKind.REJOIN: ("#2ca02c", "RJ"),
     MarkKind.BEER: ("#bcbd22", "B"),
@@ -45,6 +46,21 @@ def _badge(text: str, colour: str) -> folium.DivIcon:
               f'width:26px;height:26px;line-height:22px;text-align:center;font:bold 10px sans-serif;'
               f'box-shadow:0 0 3px rgba(0,0,0,.6)">{text}</div>'),
     )
+
+
+def _arrow_icon(angle_deg: float, colour: str) -> folium.DivIcon:
+    return folium.DivIcon(
+        icon_size=(22, 22), icon_anchor=(11, 11),
+        html=(f'<div style="background:{colour};color:#fff;border:2px solid #fff;border-radius:11px;'
+              f'width:22px;height:22px;line-height:18px;text-align:center;font:bold 13px sans-serif;'
+              f'box-shadow:0 0 3px rgba(0,0,0,.6);transform:rotate({angle_deg:.0f}deg)">&#10148;</div>'),
+    )
+
+
+def _toward(graph: StreetGraph, node, to, metres: float = 12.0) -> tuple[float, float]:
+    """A point a few metres from ``node`` along the street toward ``to``."""
+    k = graph.best_key(node, to)
+    return graph.point_on_edge(node, to, k, min(metres, graph.edge_length(node, to, k)))
 
 
 def _add_basemaps(m: folium.Map, default: str) -> None:
@@ -95,7 +111,7 @@ def trail_map(trail: Trail, graph: StreetGraph, *, show_virtual: bool = True,
         for i, mk in enumerate(trail.marks):
             lon, lat = _pos_lonlat(graph, mk.at)
             colour, text = MARK_STYLE.get(mk.kind, ("#333", "?"))
-            if mk.kind in (MarkKind.BLOB, MarkKind.ARROW):
+            if mk.kind == MarkKind.BLOB:
                 # Blobs are many and small: dots, not badges.
                 folium.CircleMarker((lat, lon), radius=3, color="#222", weight=1, fill=True,
                                     fill_color="#fff", fill_opacity=1.0,
@@ -104,8 +120,16 @@ def trail_map(trail: Trail, graph: StreetGraph, *, show_virtual: bool = True,
                 continue
             if mk.kind == MarkKind.BACKCHECK and mk.params.get("n"):
                 text = f"BC{mk.params['n']}"
-            note = ", ".join(f"{k}={v}" for k, v in mk.params.items())
-            folium.Marker((lat, lon), icon=_badge(text, colour),
+            note = ", ".join(f"{k}={v}" for k, v in mk.params.items() if k not in ("to", "ways"))
+            icon = _badge(text, colour)
+            if mk.kind == MarkKind.ARROW and mk.at.node is not None and mk.params.get("to") in graph.G:
+                tlon, tlat = _toward(graph, mk.at.node, mk.params["to"])
+                ang = math.degrees(math.atan2(-(tlat - lat), (tlon - lon) * math.cos(math.radians(lat))))
+                back = mk.params.get("leg") == "return"
+                icon = _arrow_icon(ang, "#6baed6" if back else colour)
+            elif mk.kind == MarkKind.CHECK and mk.params.get("fake"):
+                note = (note + ", " if note else "") + "trail goes straight on"
+            folium.Marker((lat, lon), icon=icon,
                           tooltip=f"#{i} {mk.kind.value}" + (f" ({note})" if note else "")).add_to(fg)
         blobs.add_to(m)
         fg.add_to(m)
@@ -159,7 +183,8 @@ window.addEventListener('load', function() {
   map.createPane('hounds');
   map.getPane('hounds').style.zIndex = 650;
   var dots = D.hounds.map(function(h) {
-    return L.circleMarker(h.path[0], {pane: 'hounds', radius: 7, color: '#fff', weight: 2, fillColor: h.colour,
+    return L.circleMarker(h.path[0], {pane: 'hounds', radius: h.hare ? 9 : 7, color: h.hare ? '#ffd400' : '#fff',
+      weight: h.hare ? 3 : 2, fillColor: h.colour,
       fillOpacity: 0.95}).bindTooltip(h.name + ' (' + h.pace + ')').addTo(map);
   });
   function fmt(s) { s = Math.round(s); return Math.floor(s / 60) + ':' + ('0' + s %% 60).slice(-2); }
@@ -175,7 +200,7 @@ window.addEventListener('load', function() {
       '<option value="120">120x</option></select> <span id="rp-clock" style="font-weight:bold">0:00</span>' +
       '<input id="rp-slider" type="range" min="0" max="' + (n - 1) * dt + '" step="1" value="0" style="width:100%%">' +
       '<div id="rp-log" style="height:84px;overflow:hidden;color:#333;line-height:14px"></div>' +
-      '<div style="color:#777;margin-top:4px">Dots: red = fastest pace, blue = slowest.</div>';
+      '<div style="color:#777;margin-top:4px">Dots: red = fastest pace, blue = slowest; black ringed in yellow = the hare.</div>';
     L.DomEvent.disableClickPropagation(d);
     L.DomEvent.disableScrollPropagation(d);
     return d;
@@ -214,8 +239,41 @@ window.addEventListener('load', function() {
 """
 
 
+def _hare_path(trail: Trail, graph: StreetGraph, times, hare=None):
+    """The hare's position at each replay time: trail plus each false out and back."""
+    from .pack import HareProfile
+    from .sim import TrailModel
+
+    hare = hare or HareProfile()
+    model = TrailModel(trail, graph)
+    legs, s_prev = [], 0.0
+    for c in model.checks:
+        for o in c.options:
+            if o.kind == "false":
+                legs += [(model.true, s_prev, c.s), (o.track, 0.0, o.false_s), (o.track, o.false_s, 0.0)]
+                s_prev = c.s
+    legs.append((model.true, s_prev, model.L))
+    t = -hare.head_start_s
+    timed = []
+    for track, a, b in legs:
+        dt_ = abs(b - a) * hare.pace_s_per_m
+        timed.append((track, a, b, t, t + dt_))
+        t += dt_
+    out = []
+    for tt in times:
+        for track, a, b, t0, t1 in timed:
+            if tt <= t1:
+                f = 0.0 if t1 == t0 else max(0.0, (tt - t0) / (t1 - t0))
+                lon, lat = track.lonlat(a + (b - a) * f)
+                break
+        else:
+            lon, lat = model.true.lonlat(model.L)
+        out.append([round(float(lat), 6), round(float(lon), 6)])
+    return out, f"lays trail at {hare.pace_label}, {hare.head_start_s / 60:.0f} min head start"
+
+
 def replay_map(trail: Trail, graph: StreetGraph, result, card=None, *, tiles: str = "streets",
-               dt: float = 5.0) -> folium.Map:
+               dt: float = 5.0, hare=None) -> folium.Map:
     """The trail map plus an animated replay of one simulated run."""
     import json
 
@@ -235,11 +293,16 @@ def replay_map(trail: Trail, graph: StreetGraph, result, card=None, *, tiles: st
     events = []
     for h in result.raw:
         for t, what in h.events:
-            if what.startswith(("On-On", "beer", "false")):
+            if what.startswith(("On-On", "beer", "F!")):
                 events.append([round(t, 1), f"{h.prof.name}: {what}"])
     for c in result.checks:
         if c.first_arrival_s is not None:
-            events.append([round(c.first_arrival_s, 1), f"Front reaches check {c.idx + 1}"])
+            name = ("whichy-way " if c.kind == "whichy" else "check ") + str(c.idx + 1)
+            events.append([round(c.first_arrival_s, 1), f"Front reaches {name}"])
+    hare_path, hare_label = _hare_path(trail, graph, times, hare)
+    if hare_path:
+        hounds.append({"name": "Hare", "pace": hare_label, "colour": "#111111", "path": hare_path,
+                       "hare": True})
     events.sort()
     score = ""
     if card is not None:

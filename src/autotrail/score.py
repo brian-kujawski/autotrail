@@ -19,7 +19,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .pack import fmt_pace
+from .pack import HareProfile, fmt_pace
 from .sim import SimResult, sample_tracks
 
 METRES_PER_MILE = 1609.344
@@ -153,8 +153,54 @@ class CheckEffectiveness:
                           "front_loss_min": (mean(losses) / 60) if losses else 0.0})
 
 
-def default_terms(target_m: float | None) -> list:
-    return [DistanceFit(target_m), Cohesion(), CheckEffectiveness()]
+def hare_margins(r: SimResult, hare: HareProfile) -> list[tuple[float, float]]:
+    """(metres along trail, seconds the hare is ahead of the first hound there) for one run.
+
+    The hare starts ``head_start_s`` early and runs the trail plus every false
+    and wrong leg out to its F and back, at ``hare.pace_s_per_m``.
+    """
+    out = []
+    detours = sorted(r.side_detours)
+    for s, t_front in r.front_profile:
+        extra = sum(d for at, d in detours if at < s)
+        t_hare = (s + extra) * hare.pace_s_per_m - hare.head_start_s
+        out.append((s, t_front - t_hare))
+    return out
+
+
+@dataclass
+class HareSafety:
+    """Full marks if the hare stays ``safe_s`` ahead of the pack all the way; zero if caught."""
+    hare: HareProfile = field(default_factory=HareProfile)
+    weight: float = 2.0
+    safe_s: float = 120.0
+    name: str = "hare_safety"
+
+    def score(self, true_trail_m, results):
+        worst, caught, at_bn, where = [], 0, [], []
+        for r in results:
+            m = hare_margins(r, self.hare)
+            if not m:
+                continue
+            s_min, w = min(m, key=lambda t: t[1])
+            worst.append(w)
+            at_bn.append(m[-1][1])
+            if w < 0:
+                caught += 1
+                where.append(next(s for s, x in m if x < 0))
+        if not worst:
+            return TermScore(self.name, 1.0, self.weight, {})
+        v = mean(min(1.0, max(0.0, w / self.safe_s)) for w in worst)
+        d = {"closest_min": median(worst) / 60, "lead_at_beer_near_min": median(at_bn) / 60,
+             "caught_pct": 100 * caught / len(worst),
+             "hare_extra_mi": sum(x for _, x in results[0].side_detours) / METRES_PER_MILE}
+        if where:
+            d["caught_at_mi"] = median(where) / METRES_PER_MILE
+        return TermScore(self.name, v, self.weight, d)
+
+
+def default_terms(target_m: float | None, hare: HareProfile | None = None) -> list:
+    return [DistanceFit(target_m), Cohesion(), CheckEffectiveness(), HareSafety(hare or HareProfile())]
 
 
 def summarize(results: list[SimResult]) -> dict:
@@ -185,8 +231,8 @@ def summarize(results: list[SimResult]) -> dict:
 
 
 def score_results(results: list[SimResult], target_m: float | None = None,
-                  terms: list | None = None) -> ScoreCard:
-    terms = terms if terms is not None else default_terms(target_m)
+                  terms: list | None = None, hare: HareProfile | None = None) -> ScoreCard:
+    terms = terms if terms is not None else default_terms(target_m, hare)
     L = results[0].true_trail_m
     return ScoreCard([t.score(L, results) for t in terms], summarize(results))
 
@@ -200,6 +246,14 @@ def format_report(card: ScoreCard, results: list[SimResult] | None = None) -> st
     lines += ["", f"True trail {s['true_trail_mi']:.2f} mi.  Extra distance run: front quarter "
               f"{s['front_extra_mi']:.2f} mi, back quarter {s['back_extra_mi']:.2f} mi, "
               f"pack average {s['pack_extra_mi']:.2f} mi.", ""]
+    hs = next((t for t in card.terms if t.name == "hare_safety"), None)
+    if hs is not None and hs.details:
+        d = hs.details
+        if d.get("caught_pct", 0) > 0:
+            msg = (f"Hare: caught in {d['caught_pct']:.0f}% of runs, around mi {d.get('caught_at_mi', 0):.2f}.")
+        else:
+            msg = f"Hare: never caught; closest the pack gets is {d['closest_min']:.1f} min behind him."
+        lines += [msg + f" Falses and wrong legs add {d['hare_extra_mi']:.2f} mi to his run.", ""]
     lines.append(f"  {'hound':<10} {'pace':>8} {'finish':>8} {'ran':>8} {'extra':>8}")
     for r in s["hounds"]:
         fin = f"{r['finish_min']:.1f}m" if r["finish_min"] is not None else "DNF"
@@ -208,13 +262,14 @@ def format_report(card: ScoreCard, results: list[SimResult] | None = None) -> st
         lines.append(f"  {r['name']:<10} {r['pace']:>8} {fin:>8} {r['distance_mi']:>6.2f}mi "
                      f"{r['extra_mi']:>+6.2f}mi")
     if results and results[0].checks:
-        lines += ["", "  check   at mi   front lost   gap in -> out  (minutes, mean over runs)"]
+        lines += ["", "  check          at mi   front lost   gap in -> out  (minutes, mean over runs)"]
         for i, c0 in enumerate(results[0].checks):
             cs = [r.checks[i] for r in results]
 
             def avg(attr):
                 v = [getattr(c, attr) for c in cs if getattr(c, attr) is not None]
                 return mean(v) / 60 if v else float("nan")
-            lines.append(f"  {i + 1:>5}   {c0.s / METRES_PER_MILE:5.2f}   {avg('front_loss_s'):9.1f}"
+            name = ("whichy " if c0.kind == "whichy" else "check ") + str(i + 1)
+            lines.append(f"  {name:<12}   {c0.s / METRES_PER_MILE:5.2f}   {avg('front_loss_s'):9.1f}"
                          f"   {avg('gap_in_s'):5.1f} -> {avg('gap_out_s'):.1f}")
     return "\n".join(lines)

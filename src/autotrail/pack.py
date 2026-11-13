@@ -31,13 +31,11 @@ class HoundProfile:
     name: str
     pace_s_per_m: float          # base pace
     pace_jitter: float = 0.03    # each run draws pace * (1 +/- jitter)
-    detect_prob: float = 0.9     # chance of spotting any one mark while running
+    detect_prob: float = 0.9     # chance of spotting any one blob (checks, arrows, F: always seen)
     give_up_m: float = 200.0     # run this far past the last mark seen, then turn back
     check_search_m: float = 150.0  # how far out a hound runs a direction from a check
-    confirm_marks: int = 2       # marks found past a check before calling On-On
-    sight_m: float = 40.0        # a mark this close past a corner can be seen from it
+    confirm_marks: int = 3       # marks past a check: On one, On two, On-On
     check_pause_s: float = 4.0   # time to look around before picking a direction
-    follow_s: float = 45.0       # takes a corner the right way if someone did within this
     split_preference: str = "eagle"  # phase 2 (Turkey/Eagle splits)
     role: str = "runner"         # runner, walker, frb
 
@@ -64,3 +62,14 @@ def default_pack() -> list[HoundProfile]:
 def perfect(profile: HoundProfile) -> HoundProfile:
     """A hound that never misses a mark (for tests and the true trail baseline)."""
     return replace(profile, detect_prob=1.0, pace_jitter=0.0)
+
+
+@dataclass(frozen=True)
+class HareProfile:
+    """The hare lays trail ahead of the pack and runs every false and wrong leg out and back."""
+    pace_s_per_m: float = pace_from_min_per_mile(10.25)  # slowed down by laying marks
+    head_start_s: float = 15 * 60.0
+
+    @property
+    def pace_label(self) -> str:
+        return fmt_pace(self.pace_s_per_m)

@@ -3,7 +3,10 @@ import json
 import pytest
 
 from autotrail.generate import GenerateOptions, generate
-from autotrail.sim import TrailModel, simulate
+from autotrail.pack import HareProfile
+from autotrail.rules import Footprint, Geometry
+from autotrail.score import score_results
+from autotrail.sim import TrailModel, simulate, simulate_many
 from autotrail.trail import METRES_PER_MILE, MarkKind, Trail, load_trail
 
 
@@ -29,10 +32,34 @@ def test_generated_marks(generated, city):
     spacing = [b.s - a.s for a, b in zip(model.checks, model.checks[1:])]
     assert all(s >= 300.0 - 1e-6 for s in spacing)
     check_nodes = {c.node for c in model.checks}
-    assert t.branches and all(b.from_node in check_nodes for b in t.branches)
+    assert all(b.from_node in check_nodes for b in t.branches)
     assert sum(m.kind == MarkKind.FALSE for m in t.marks) == len(t.branches)
+    assert sum(b.label.startswith("false") for b in t.branches) <= 2
     assert any(m.params.get("leg") == "return" for m in t.marks)
+    assert not model.unmarked_turns  # every turn has a check, arrow or whichy-way
     assert not model.warnings
+
+
+def test_generated_trail_keeps_clear_of_itself(generated, city):
+    """No crossing, no doubling back, no running back down the other side of a street."""
+    t = generated.trail
+    geo = Geometry(city)
+    o = GenerateOptions()
+    fp = Footprint(geo, o.keep_apart_m)
+    sx, sy = geo.node_xy(t.start)
+    ex, ey = geo.node_xy(t.end)
+    fp.zones += [(sx, sy, 2 * o.keep_apart_m), (ex, ey, 2 * o.keep_apart_m)]
+    assert not fp.path_clashes([(e.u, e.v, e.key) for e in t.true_path], "true")
+    assert not fp.path_clashes([(e.u, e.v, e.key) for e in t.return_path], "return")
+    nodes = [e.u for e in t.true_path] + [t.end]
+    assert len(nodes) == len(set(nodes))
+
+
+def test_generated_hare_stays_ahead(generated, city):
+    t = generated.trail
+    results = simulate_many(t, city, runs=5)
+    card = score_results(results, t.true_trail_m(city), hare=HareProfile())
+    assert card.term("hare_safety").value > 0.0
 
 
 def test_generated_round_trip_sims_the_same(generated, city, tmp_path):
