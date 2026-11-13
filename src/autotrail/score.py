@@ -276,10 +276,29 @@ class Variety:
         return TermScore(self.name, v, self.weight, d)
 
 
+@dataclass
+class Twistiness:
+    """Turns slow the pack more than the hare (a mark takes the hare ~3 s), and a twisty trail
+    is harder to follow and more fun. Full marks at ``target`` real turns per mile (jogs
+    don't count), sliding to 0 at none."""
+    weight: float = 1.0
+    target: float = 12.0
+    name: str = "twistiness"
+
+    def score(self, true_trail_m, results):
+        if not results or results[0].model is None:
+            return TermScore(self.name, 1.0, self.weight, {})
+        from .rules import turns_per_mile
+
+        m = results[0].model
+        tpm = turns_per_mile(m.geo, m.true.edges, m.true.cum)
+        return TermScore(self.name, float(min(1.0, tpm / self.target)), self.weight, {"turns_per_mi": tpm})
+
+
 def default_terms(target_m: float | None, hare: HareProfile | None = None) -> list:
     hare = hare or HareProfile()
     return [DistanceFit(target_m), Cohesion(), CheckEffectiveness(), HareSafety(hare), HareHidden(hare),
-            Variety()]
+            Variety(), Twistiness()]
 
 
 def summarize(results: list[SimResult]) -> dict:

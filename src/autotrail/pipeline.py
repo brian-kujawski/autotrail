@@ -117,8 +117,11 @@ def preview_walk_mi(g: StreetGraph, start: LonLat, end: LonLat, miles: float) ->
 
 def run(g: StreetGraph, start: LonLat, end: Optional[LonLat], s: RunSettings, *,
         out: Path, map_out: Optional[Path] = None, gpx: Optional[Path] = None,
-        tiles: str = "streets", progress: Callable[[str], None] | None = None) -> RunResult:
-    """Generate, score and save one trail. ``start``/``end`` are (lon, lat)."""
+        tiles: str = "streets", progress: Callable[[str], None] | None = None,
+        on_route: Callable[[dict], None] | None = None) -> RunResult:
+    """Generate, score and save one trail. ``start``/``end`` are (lon, lat).
+
+    ``on_route`` sees every route attempt (see :func:`autotrail.generate.generate`)."""
     from .generate import GenerateOptions, generate
     from .score import format_report, score_results
     from .sim import simulate_many
@@ -143,7 +146,7 @@ def run(g: StreetGraph, start: LonLat, end: Optional[LonLat], s: RunSettings, *,
 
     pack, hare = s.pack(), s.hare()
     opts = GenerateOptions(miles=s.miles, return_miles=back_mi, tries=s.tries, exact_ends=True)
-    res = generate(g, s_node, e_node, opts, pack=pack, hare=hare, seed=s.seed, progress=say)
+    res = generate(g, s_node, e_node, opts, pack=pack, hare=hare, seed=s.seed, progress=say, on_route=on_route)
     trail = res.trail
     if not s.return_leg:
         trail.return_path = []

@@ -98,6 +98,54 @@ def test_generate_job(server, city):
     assert runs[0]["run"] == r["run"]
 
 
+def test_step_through_routes(server, city):
+    body = {"start": _ll(city, START), "end": _ll(city, BEER), "step": True,
+            "settings": {"miles": 2, "tries": 12, "runs": 2, "seed": 3}}
+    job = _post(server + "/api/generate", body)
+    jid = job["id"]
+    for _ in range(100):
+        job = _get(f"{server}/api/jobs/{jid}")
+        if job["waiting"]:
+            break
+        time.sleep(0.1)
+    assert job["waiting"] and job["route"]["n"] == 1
+    r = job["route"]
+    assert r["back"] and r["start"] and r["end"]  # the way back is planned before the trail
+    assert r["trail"] or not r["ok"]
+    _post(f"{server}/api/jobs/{jid}/next", {})
+    for _ in range(100):
+        job = _get(f"{server}/api/jobs/{jid}")
+        if job["waiting"] and job["route"]["n"] == 2:
+            break
+        time.sleep(0.1)
+    assert job["route"]["n"] == 2
+    _post(f"{server}/api/jobs/{jid}/run", {})  # stop pausing
+    for _ in range(300):
+        job = _get(f"{server}/api/jobs/{jid}")
+        if job["state"] in ("done", "failed"):
+            break
+        time.sleep(0.2)
+    assert job["state"] == "done", job
+    assert sum(job["tally"].values()) == 12
+
+
+def test_stop_a_stepped_run(server, city):
+    body = {"start": _ll(city, START), "end": _ll(city, BEER), "step": True,
+            "settings": {"miles": 2, "tries": 12, "runs": 2, "seed": 4}}
+    jid = _post(server + "/api/generate", body)["id"]
+    for _ in range(100):
+        if _get(f"{server}/api/jobs/{jid}")["waiting"]:
+            break
+        time.sleep(0.1)
+    _post(f"{server}/api/jobs/{jid}/stop", {})
+    for _ in range(50):
+        job = _get(f"{server}/api/jobs/{jid}")
+        if job["state"] != "running":
+            break
+        time.sleep(0.1)
+    assert job["state"] == "failed" and "Stopped" in job["error"]
+
+
 def test_bad_requests(server, city):
     with pytest.raises(urllib.error.HTTPError) as e:
         _post(server + "/api/generate", {"start": None})

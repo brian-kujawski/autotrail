@@ -98,7 +98,7 @@ def test_long_trail_pack_all_finish_and_fast_hounds_pay_more(city):
 
 
 def test_checks_take_three_marks_and_whichy_ways_one(city):
-    t = long_trail(city, seed=2, whichy_ways=(1, 1))
+    t = long_trail(city, seed=2, arrow_share=0.0)
     model = TrailModel(t, city)
     kinds = {c.kind for c in model.checks}
     assert kinds == {"check", "whichy"}
@@ -173,3 +173,16 @@ def test_replay_map(city):
     card = score_results(results, t.true_trail_m(city), hare=HareProfile())
     html = replay_map(t, city, results[0], card, hare=HareProfile()).get_root().render()
     assert "rp-play" in html and "Runner 12" in html and "Score" in html
+
+
+def test_whichy_way_wrong_leg_is_unmarked_and_free_for_the_hare(city):
+    t = long_trail(city, seed=2, arrow_share=0.0, falses=(0, 0))
+    whichies = [m for m in t.marks if m.kind == MarkKind.WHICHY_WAY]
+    assert whichies
+    assert not t.branches  # nothing laid down any wrong way
+    assert not any(m.kind == MarkKind.FALSE for m in t.marks)
+    model = TrailModel(t, city)
+    assert model.side_detours == []  # the hare runs no extra distance
+    w = [c for c in model.checks if c.kind == "whichy"]
+    assert all(any(o.kind == "probe" for o in c.options) for c in w)
+    assert all(len(c.options) == 2 for c in w)  # the two ways drawn, nothing else

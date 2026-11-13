@@ -30,6 +30,8 @@ STRAIGHT_DEG = 20.0   # the straight-on leg is at most this far off the incoming
 CLEAR_DEG = 20.0      # ...and every other leg is at least this much further off
 HEADING_M = 15.0      # direction of a street is measured over its first/last few metres
 JOG_M = 20.0          # two turns that cancel out within this distance are just straight on
+CORRIDOR_M = 50.0     # a street's two sides (sidewalks, carriageways) up to this far apart are ONE street
+PARALLEL_DEG = 25.0   # stretches this close to parallel, within CORRIDOR_M, are the same street
 
 
 SIDEWALK_TAGS = {"sidewalk", "crossing", "traffic_island"}
@@ -160,11 +162,32 @@ class Geometry:
         return len(self.ways_on(prev, node)) >= 2
 
 
+def street_name(data: dict) -> str | None:
+    n = data.get("name")
+    if isinstance(n, list):
+        n = n[0] if n else None
+    return str(n) if n else None
+
+
+def same_street(geo: Geometry, a: tuple, b: tuple) -> bool:
+    """Could edges a and b be two sides of one street? Both separately mapped sidewalks, or the same name."""
+    G = geo.g.G
+    da, db = G.edges[a[0], a[1], a[2] if len(a) > 2 else geo.g.best_key(a[0], a[1])], \
+        G.edges[b[0], b[1], b[2] if len(b) > 2 else geo.g.best_key(b[0], b[1])]
+    if is_sidewalk(da) and is_sidewalk(db):
+        return True
+    na, nb = street_name(da), street_name(db)
+    return na is not None and na == nb
+
+
 def jog_corners(geo: Geometry, edges: list[tuple], cum) -> set[int]:
     """Indices i (corner = ``edges[i][0]``) that sit inside a jog along a path.
 
     A jog starts at a turn and ends at a later corner within ``JOG_M`` where
     the way out lines up again with the way in (within ``STRAIGHT_DEG``).
+    Hopping across a street from one side to the other is a jog too, within
+    ``CORRIDOR_M``, when the way in and the way out are two sides of the same
+    street (both sidewalks, or the same name): it's still one street.
     """
     out: set[int] = set()
     n = len(edges)
@@ -176,26 +199,41 @@ def jog_corners(geo: Geometry, edges: list[tuple], cum) -> set[int]:
             continue
         a = geo.heading_in(prev, node)
         for j in range(i + 1, n):
-            if cum[j] - cum[i] > JOG_M:
+            gap = cum[j] - cum[i]
+            if gap > CORRIDOR_M:
                 break
             b = geo.heading_out(edges[j][0], edges[j][1])
             if abs(math.degrees((b - a + math.pi) % (2 * math.pi) - math.pi)) <= STRAIGHT_DEG:
-                out.update(range(i, j + 1))
+                if gap <= JOG_M or same_street(geo, edges[i - 1], edges[j]):
+                    out.update(range(i, j + 1))
                 break
     return out
 
 
 def straight_runs(geo: Geometry, edges: list[tuple], cum) -> list[tuple[float, float]]:
     """(from, to) metres of each straightaway: corners where the way on is within ``STRAIGHT_DEG``
-    of the way in don't break it, whatever the marks say."""
+    of the way in don't break it, whatever the marks say, and nor does a jog (a hop to the
+    other side of the same street is still the same straightaway)."""
     out, a = [], 0.0
+    jogs = jog_corners(geo, edges, cum)
     for i in range(1, len(edges)):
-        if geo.deviation(edges[i - 1][0], edges[i][0], edges[i][1]) > STRAIGHT_DEG:
+        if i not in jogs and geo.deviation(edges[i - 1][0], edges[i][0], edges[i][1]) > STRAIGHT_DEG:
             out.append((a, float(cum[i])))
             a = float(cum[i])
     if edges:
         out.append((a, float(cum[len(edges)])))
     return out
+
+
+def turns_per_mile(geo: Geometry, edges: list[tuple], cum) -> float:
+    """How twisty a path is: real turns (not jogs) per mile of path."""
+    L = float(cum[len(edges)]) if edges else 0.0
+    if L <= 0:
+        return 0.0
+    jogs = jog_corners(geo, edges, cum)
+    n = sum(1 for i in range(1, len(edges)) if i not in jogs
+            and geo.deviation(edges[i - 1][0], edges[i][0], edges[i][1]) > STRAIGHT_DEG)
+    return n / (L / 1609.344)
 
 
 def turn_angle(geo: Geometry, prev, node, nxt) -> float:
@@ -212,9 +250,14 @@ class Footprint:
     (a corner is always close to the street you came in on).
     """
 
-    def __init__(self, geo: Geometry, radius_m: float = 25.0, step_m: float = 8.0):
+    def __init__(self, geo: Geometry, radius_m: float = 25.0, step_m: float = 8.0,
+                 corridor_m: float = CORRIDOR_M):
         self.geo, self.r, self.step = geo, radius_m, step_m
-        self.cells: dict[tuple[int, int], list[tuple[float, float, str, float]]] = {}
+        # Running parallel within corridor_m is the same street (the other sidewalk of a boulevard),
+        # so it clashes too; crossing at an angle only clashes within radius_m.
+        self.wide = max(radius_m, corridor_m)
+        self.cell = self.wide
+        self.cells: dict[tuple[int, int], list[tuple[float, float, str, float, float, float]]] = {}
         self.zones: list[tuple[float, float, float]] = []  # (x, y, r): ignore points in here
 
     @property
@@ -224,23 +267,32 @@ class Footprint:
         return max(50.0, 2.5 * self.r)
 
     def _samples(self, e: tuple):
-        """[(metres along, x, y)] every ``step_m`` along the edge (cached on the Geometry)."""
-        cache = self.geo.__dict__.setdefault("_samples", {})
+        """[(metres along, x, y, ux, uy)] every ``step_m`` along the edge, (ux, uy) = unit direction
+        there (cached on the Geometry)."""
+        cache = self.geo.__dict__.setdefault("_samples_dir", {})
         key = (e, self.step)
         hit = cache.get(key)
         if hit is None:
             cum, x, y, _, _ = self.geo.edge_poly(e)
             n = max(2, int(cum[-1] // self.step) + 1)
             d = np.linspace(0.0, cum[-1], n)
-            hit = cache[key] = list(zip(d.tolist(), np.interp(d, cum, x).tolist(), np.interp(d, cum, y).tolist()))
+            sx, sy = np.interp(d, cum, x), np.interp(d, cum, y)
+            ahead = np.minimum(d + 4.0, cum[-1])
+            back = np.maximum(d - 4.0, 0.0)
+            dx = np.interp(ahead, cum, x) - np.interp(back, cum, x)
+            dy = np.interp(ahead, cum, y) - np.interp(back, cum, y)
+            norm = np.hypot(dx, dy)
+            norm[norm == 0] = 1.0
+            hit = cache[key] = list(zip(d.tolist(), sx.tolist(), sy.tolist(), (dx / norm).tolist(),
+                                        (dy / norm).tolist()))
         return hit
 
     def _cell(self, x, y):
-        return (int(math.floor(x / self.r)), int(math.floor(y / self.r)))
+        return (int(math.floor(x / self.cell)), int(math.floor(y / self.cell)))
 
     def add(self, e: tuple, tag: str, pos0: float) -> None:
-        for di, x, y in self._samples(e):
-            self.cells.setdefault(self._cell(x, y), []).append((x, y, tag, pos0 + di))
+        for di, x, y, ux, uy in self._samples(e):
+            self.cells.setdefault(self._cell(x, y), []).append((x, y, tag, pos0 + di, ux, uy))
 
     def add_path(self, edges, tag: str, pos0: float = 0.0) -> None:
         pos = pos0
@@ -259,16 +311,18 @@ class Footprint:
         one, doesn't count as coming near the street you just left).
         """
         recent_m = self.recent_default if recent_m is None else recent_m
-        r2 = self.r * self.r
-        for di, x, y in self._samples(e):
+        r2, w2 = self.r * self.r, self.wide * self.wide
+        cos_par = math.cos(math.radians(PARALLEL_DEG))
+        for di, x, y, ux, uy in self._samples(e):
             here = pos0 + di
             cx, cy = self._cell(x, y)
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
-                    for px, py, ptag, ppos in self.cells.get((cx + dx, cy + dy), ()):
+                    for px, py, ptag, ppos, pux, puy in self.cells.get((cx + dx, cy + dy), ()):
                         if ptag == tag and ppos >= here - recent_m - 1e-6:
                             continue
-                        if (px - x) ** 2 + (py - y) ** 2 <= r2:
+                        d2 = (px - x) ** 2 + (py - y) ** 2
+                        if d2 <= r2 or (d2 <= w2 and abs(ux * pux + uy * puy) >= cos_par):
                             if self.zones and self.in_zone(x, y):
                                 continue
                             return True
@@ -284,7 +338,7 @@ class Footprint:
         r2 = self.r * self.r
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
-                for px, py, ptag, ppos in self.cells.get((cx + dx, cy + dy), ()):
+                for px, py, ptag, ppos, _, _ in self.cells.get((cx + dx, cy + dy), ()):
                     if ptag == tag and ppos >= pos - recent_m - 1e-6:
                         continue
                     if (px - x) ** 2 + (py - y) ** 2 <= r2:
@@ -302,7 +356,7 @@ class Footprint:
         return False
 
     def copy(self) -> "Footprint":
-        fp = Footprint(self.geo, self.r, self.step)
+        fp = Footprint(self.geo, self.r, self.step, self.wide)
         fp.cells = {k: list(v) for k, v in self.cells.items()}
         fp.zones = list(self.zones)
         return fp
