@@ -26,6 +26,29 @@ autotrail download              # fetch + cache Detroit, Highland Park, Hamtramc
 autotrail show examples/corktown_sample.geojson --open
 ```
 
+### Web GUI (the easy way)
+
+```bash
+autotrail gui
+```
+
+Loads the map once (that part takes a while on Detroit), then opens `http://localhost:8765/` in
+your browser. Click the map to set **Start**, then click where the **Beer Near** goes (the car
+and cooler). Drag either marker to move it; both snap to the nearest intersection. The page
+tells you how far the Beer Near is on foot from Start and refuses a pair that can't make a
+trail of the length you asked for. Set the trail length, seed and, under *Pack, hare and
+search*, the pack, the hare and how many routes to try, then **Generate trail**. Progress shows
+as it runs; when it's done the **Trail and replay** tab shows the map with the pack replay
+(press Play), the score, and GeoJSON and GPX downloads. **Try another seed** reruns with the
+next seed. Every run is saved under `data/gui_runs/<time>-seed<n>/` and listed under *Earlier
+runs*, so you can flip back to one.
+
+Tick *Let Autotrail pick the Beer Near* to have it choose one about a mile from Start, as the
+command line does without `--end`.
+
+`--port`, `--no-open` and `--runs-dir` change the defaults. The server only listens on this PC
+(`127.0.0.1`). Leaflet and the map tiles come from the internet, so you need to be online.
+
 ### One-click trail
 
 ```bash
@@ -33,9 +56,10 @@ autotrail generate --start "42.3315,-83.0700" --open
 autotrail generate --start "42.3315,-83.0700" --end "42.3350,-83.0600" --miles 4 --seed 2 --out tuesday.geojson
 ```
 
-Start (and the Beer Near, if you give one) snap to the nearest intersection. Without `--end`
-a Beer Near is picked about `--return-miles` (default 1) from Start, and a hared leg back is
-added. It tries about 60 loop-shaped routes that keep clear of themselves, puts marks on the
+Start (and the Beer Near, if you give one) snap to the nearest intersection. With `--end`
+the leg back to Start is sized from the real walk between the two (`--return-miles 0` still
+turns it off). Without `--end` a Beer Near is picked about `--return-miles` (default 1) from
+Start, and a hared leg back is added. It tries about 60 loop-shaped routes that keep clear of themselves, puts marks on the
 best few several ways, simulates the pack and the hare on each and keeps the best. Takes about
 a minute on the Detroit map. `--seed` gives a different trail. It writes the trail GeoJSON plus
 an HTML map with the pack replay (press Play), and prints the score.
@@ -192,6 +216,8 @@ download), `show` rebuilds the trail from the saved geometry instead.
 | `autotrail.score` | `ScoreTerm` plug-ins, `ScoreCard`, text report |
 | `autotrail.generate` | route search, mark placement, `generate` (the one click) |
 | `autotrail.viz` | Folium map and pack replay |
+| `autotrail.pipeline` | one generate run (settings, Start/Beer Near checks, files), shared by the CLI and GUI |
+| `autotrail.gui` | local web GUI: `server.py` (standard library HTTP server) and `index.html` (Leaflet page) |
 | `autotrail.cli` | `autotrail` command |
 
 ## Tests
