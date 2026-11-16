@@ -112,6 +112,8 @@ def test_step_through_routes(server, city):
     r = job["route"]
     assert r["back"] and r["start"] and r["end"]  # the way back is planned before the trail
     assert r["trail"] or not r["ok"]
+    if r["ok"]:  # step mode shows each kept route's corner facts
+        assert r["facts"]["ways"] and "shortcut_corners" in r["facts"]["summary"]
     _post(f"{server}/api/jobs/{jid}/next", {})
     for _ in range(100):
         job = _get(f"{server}/api/jobs/{jid}")

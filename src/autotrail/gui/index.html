@@ -140,7 +140,10 @@ pre.report { font-size: 11px; white-space: pre-wrap; background: var(--chip); pa
       <button class="small" id="stepRun" type="button" title="Stop pausing and run the rest">Run the rest</button>
       <button class="small" id="stepStop" type="button" title="Stop this run">Stop</button>
     </div>
-    <div class="legend"><i style="border-color:var(--accent)"></i>trail tried<i class="back" style="border-color:#2563eb"></i>way back<span style="margin-left:8px">① ② … waypoints</span></div>
+    <div class="legend"><i style="border-color:var(--accent)"></i>trail tried<i class="back" style="border-color:#2563eb"></i>way back<span style="margin-left:8px">① ② … waypoints</span><i class="back" style="border-color:#9ca3af"></i>loop they were drawn around</div>
+    <div class="legend" id="factLegend" style="display:none">Wrong ways at each corner:<i style="border-color:#be123c"></i>shortcut<i class="back" style="border-color:#d97706"></i>meets trail, saves little<i style="border-color:#6b7280"></i>dead end<i style="border-color:#16a34a"></i>safe<span style="margin-left:8px">◉ checkers would see the hare</span>
+      <label style="display:block;margin-top:4px"><input type="checkbox" id="factSafe"> show safe ways too</label></div>
+    <div class="what" id="factWhat"></div>
   </div>
   <div id="log"></div>
 
@@ -320,11 +323,39 @@ function drawRoute(j) {
   if ($("replay").style.display === "block") showTab("pick");
   if (tryLayer) tryLayer.remove();
   tryLayer = L.layerGroup().addTo(map);
+  // The loop the waypoints were drawn around (they're jittered off it, in and out).
+  if (r.outline && r.outline.length) L.polyline(r.outline, { color: "#111827", weight: 1.5, opacity: .5, dashArray: "2 6" }).addTo(tryLayer);
   if (r.back.length) L.polyline(r.back, { color: "#2563eb", weight: 4, opacity: .8, dashArray: "8 6" }).addTo(tryLayer);
-  if (r.trail.length) L.polyline(r.trail, { color: r.ok ? css("--accent") : "#6b7280", weight: 4, opacity: .9,
+  // With corner facts on top, fade the trail so the coloured wrong ways stand out.
+  if (r.trail.length) L.polyline(r.trail, { color: r.ok ? css("--accent") : "#6b7280", weight: 4, opacity: r.facts ? .4 : .9,
     dashArray: r.ok ? null : "3 6" }).addTo(tryLayer);
+  drawFacts(r.facts);
   r.waypoints.forEach((w, i) => L.marker(w, { interactive: false, icon: L.divIcon({ className: "", iconSize: [18, 18],
     iconAnchor: [9, 9], html: `<div class="wp">${i + 1}</div>` }) }).addTo(tryLayer));
+}
+// Corner facts (step mode, kept routes): every wrong way off the trail, coloured by what a hound
+// who took it would find. Hover a stub for the details.
+const FACT_STYLE = { shortcut: { color: "#be123c", weight: 6 },
+  rejoins: { color: "#d97706", weight: 3, dashArray: "6 5" }, dead_end: { color: "#6b7280", weight: 3 },
+  open: { color: "#16a34a", weight: 2 }, back: { color: "#111827", weight: 2, dashArray: "2 5" } };
+let factLayer = null, lastFacts = null;
+function drawFacts(f) {
+  lastFacts = f;
+  if (factLayer) { factLayer.remove(); factLayer = null; }
+  $("factLegend").style.display = f ? "block" : "none";
+  $("factWhat").textContent = "";
+  if (!f) return;
+  factLayer = L.layerGroup().addTo(tryLayer || map);
+  const safe = $("factSafe").checked;
+  f.ways.forEach(w => {
+    if (!safe && (w.kind === "open" || w.kind === "back")) return;
+    if (w.line.length > 1) L.polyline(w.line, { ...FACT_STYLE[w.kind], opacity: .9 }).bindTooltip(w.note, { sticky: true }).addTo(factLayer);
+  });
+  f.eyes.forEach(e => L.circleMarker(e.at, { radius: 9, color: "#ea580c", weight: 2, fill: false })
+    .bindTooltip(e.note).addTo(factLayer));
+  const s = f.summary, n = s.ways;
+  $("factWhat").textContent = `${s.corners} corners (${s.turns} turns). ${s.shortcut_corners} have a wrong way that's a shortcut; ${s.sees_hare_corners} would show checkers the hare. ` +
+    `Other wrong ways: ${n.rejoins} meet trail but save little, ${n.dead_end} dead ends, ${n.open} safe.`;
 }
 async function stepControl(action) {
   if (!state.job) return;
@@ -406,6 +437,7 @@ async function init() {
   $("stepNext").onclick = () => stepControl("next");
   $("stepRun").onclick = () => stepControl("run");
   $("stepStop").onclick = () => stepControl("stop");
+  $("factSafe").onchange = () => drawFacts(lastFacts);
   document.addEventListener("keydown", e => {
     if (!state.job || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) return;
     if (e.key === "n" || e.key === "N" || e.key === "ArrowRight") { e.preventDefault(); if (!$("stepNext").disabled) stepControl("next"); }
