@@ -1045,8 +1045,9 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
         return ret if ret is not None else net.clear_path(e, start, fpr, "return", 0.0, set(), **kw)
 
     # Loop size: a first guess (the route weaves in and out, so it's longer than the rim);
-    # each route found steers it toward the target.
+    # every attempt steers it toward the target (see below).
     radius = target / 5.5
+    twist_ratio: list[float] = []  # route length / shortest walk through its waypoints, per route found
     per_end = max(1, o.tries // len(ends))
     n_try, total = 0, per_end * len(ends)
     no_way_back = 0
@@ -1065,8 +1066,23 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
                                  turn_cost_m=o.turn_cost_m, timing=timing, sight_cost=o.sight_cost,
                                  straight_run_m=o.straight_run_m, straight_cost=o.straight_cost, stats=stats,
                                  waypoints=o.waypoints, reserved=ret, trace=trace)
-            if trace.get("too_long_m"):
-                radius *= (target / trace["too_long_m"]) ** 0.5  # steer smaller on loops that ran out of length
+            # Steer the loop size toward the target on every attempt, not just the ones that work:
+            # real streets (rivers, freeways, rail yards, sidewalk networks) make the walk round a
+            # loop much longer than its outline, and that differs from city to city.
+            est = None
+            if got:
+                est = path_len(g, got[0])
+                if math.isfinite(trace.get("least_m", math.inf)) and trace["least_m"] > 0:
+                    twist_ratio.append(est / trace["least_m"])
+            elif trace.get("too_long_m"):
+                est = trace["too_long_m"]  # ran out of length partway: at least this long
+            elif "least_m" in trace:
+                # Never searched (waypoints too far apart on foot, or the search failed): the shortest
+                # walk through the waypoints, times how much longer real routes have come out.
+                ratio = sorted(twist_ratio)[len(twist_ratio) // 2] if twist_ratio else 1.15
+                est = trace["least_m"] * ratio if math.isfinite(trace["least_m"]) else 1.6 * target
+            if est:
+                radius *= min(1.5, max(0.6, (target / est) ** 0.5))
             info = {"n": n_try, "of": total, "start": start, "end": e, "return": ret or [],
                     "waypoints": trace["waypoints"], "edges": trace["edges"], "ok": False,
                     "outline": trace["shape"].outline() if trace.get("shape") else [],
@@ -1074,7 +1090,6 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
             if got:
                 r, fp = got
                 length = path_len(g, r)
-                radius *= (target / length) ** 0.5  # steer the loop size toward the target
                 fit = DistanceFit(target).score(length, []).value
                 tpm = turns_per_mile(geo, r, _cum(g, r))
                 info.update(length_m=length, turns_per_mile=tpm, fit=fit)

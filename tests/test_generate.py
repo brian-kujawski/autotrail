@@ -179,3 +179,22 @@ def test_seg_dist():
 
     assert _seg_dist(5, 3, 0, 0, 10, 0) == 3
     assert _seg_dist(-4, 3, 0, 0, 10, 0) == 5
+
+
+def test_loop_shrinks_when_waypoints_are_too_far_apart_on_foot(city, monkeypatch):
+    """Attempts that never get searched (the walk through the waypoints is already too long) still
+    steer the loop smaller: otherwise a city with long walks round barriers fails every attempt."""
+    import autotrail.generate as gen
+
+    radii = []
+
+    def fake_loop_route(net, geo, start, end, target, rng, radius, *a, trace=None, **kw):
+        radii.append(radius)
+        trace.update(least_m=1.6 * target * (radius / radii[0]), reason="waypoints too far apart on foot")
+        return None
+
+    monkeypatch.setattr(gen, "loop_route", fake_loop_route)
+    with pytest.raises(RuntimeError):
+        gen.generate(city, 8 * 16 + 8, 8 * 16 + 11, GenerateOptions(miles=2.0, tries=8, runs=1))
+    assert all(b < a for a, b in zip(radii, radii[1:]))
+    assert radii[-1] < 0.6 * radii[0]
