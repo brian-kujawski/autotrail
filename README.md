@@ -129,12 +129,13 @@ Both the generator and the simulated hounds follow these (`autotrail.rules`):
   distance to spare for twists, and routes are shortlisted (and scored, `twistiness`) on turns per mile as well as
   distance. On a 100 m test grid that's ~15 turns per mile with straights of a block or two.
 * **One loop, out and back in.** Waypoints go round one loop in order: out from Start, round a
-  far point roughly away from the Beer Near, and home to the Beer Near, so no leg has to cut
-  across an earlier one. None sits near Start, the Beer Near or the streets between them (a
+  far point in any direction, and home to the Beer Near, so no leg has to cut across an
+  earlier one (pointing back past the Beer Near, the loop hangs off the Beer Near: trail heads
+  out past it and comes home from beyond). None sits near Start, the Beer Near or the streets between them (a
   quarter of the loop radius), leaving those for the first and last legs and the way back. The
   shape is drawn fresh each time: long and narrow (nearly an out-and-back) through fat beans,
   bent, lopsided, every point at its own distance. "Loop" is only topology. If the far end
-  would be in a river or past a freeway, the loop swings wider.
+  would be in a river or past a freeway, another direction is drawn.
 * **Keep hounds honest.** Most checks are at turns, but some checks and whichy-ways have
   straight on as the answer: any quarter mile with no check or whichy-way may get one at a
   crossing, and now and then a run of short blocks gets a whichy-way at every crossing

@@ -398,10 +398,9 @@ def _seg_dist(px, py, ax, ay, bx, by) -> float:
 class LoopShape:
     """Where a trail's waypoints go: one loop out from Start and back in to the Beer Near.
 
-    The loop runs from the middle of Start and the Beer Near (the anchor) out
-    to a far point and back. The far point is roughly away from the Beer Near
-    (``loop_shape`` allows 70 degrees either side, more if that end is unwalkable), so trail heads out one side and comes
-    home the other without wrapping round Start. Only the order is fixed (one
+    The loop runs from its root (the anchor, on the line from Start to the
+    Beer Near) out to a far point in any direction and back, so trail heads
+    out one side and comes home the other. Only the order is fixed (one
     way round, never back across itself); the shape is drawn fresh each time:
     long and narrow (a long out-and-back), fat (a bean), bent (a banana),
     fatter at one end than the other, and every point at its own distance.
@@ -452,22 +451,26 @@ class LoopShape:
         return pts
 
 
-def loop_shape(rng: random.Random, start_xy, end_xy, radius_m: float, n: int,
-               spread_deg: float = 70.0) -> LoopShape:
-    """Draw a loop for ``n`` waypoints whose length comes out at roughly 5.5x ``radius_m``."""
+def loop_shape(rng: random.Random, start_xy, end_xy, radius_m: float, n: int) -> LoopShape:
+    """Draw a loop for ``n`` waypoints whose length comes out at roughly 5.5x ``radius_m``.
+
+    The far point can be in any direction. Trail plus the way back has to make one ring that
+    never crosses itself; that holds whichever way the loop points, so long as it hangs off the
+    right place. Pointing away from the Beer Near (or out to either side), the loop starts
+    midway between Start and the Beer Near. Pointing back past the Beer Near, its root slides
+    down to the Beer Near: trail heads out past it, goes round, and comes home from beyond.
+    """
     sx, sy = start_xy
     ex, ey = end_xy
-    if (sx, sy) == (ex, ey):
-        away = rng.uniform(0, 2 * math.pi)
-    else:
-        away = math.atan2(sy - ey, sx - ex)  # from the Beer Near through Start, and on
-    spread = min(spread_deg, 180.0)
-    heading = away + math.radians(rng.uniform(-spread, spread))
+    heading = rng.uniform(0, 2 * math.pi)
     ratio = rng.uniform(0.15, 0.8)  # width / length: 0.15 is nearly an out-and-back, 0.8 a fat bean
     # The rim is about pi/2 * (length + width); the route weaves in and out of it and twists
     # (about 10% more), so this lands near the old loop's 5.5x radius.
     length = 5.0 * radius_m * rng.uniform(0.85, 1.15) / (math.pi / 2 * (1 + ratio))
     ax, ay = (sx + ex) / 2, (sy + ey) / 2
+    toward = math.cos(heading - math.atan2(sy - ey, sx - ex)) if (sx, sy) != (ex, ey) else 0.0
+    if toward < 0:  # heading back past the Beer Near: root the loop nearer it (at it, head-on)
+        ax, ay = ax + (sx - ex) / 2 * toward, ay + (sy - ey) / 2 * toward
     # Go out on Start's side of the line to the far point, come home on the Beer Near's.
     ux, uy = math.cos(heading), math.sin(heading)
     off = -uy * (sx - ax) + ux * (sy - ay)
@@ -485,8 +488,7 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
     """One trail Start -> end shaped as a loop through a few random waypoints.
 
     The waypoints go round one loop in order (see ``LoopShape``): out from
-    Start, round a far point away from the Beer Near, and back in to the Beer
-    Near, so no leg has to cross an earlier one. None sits near Start, the
+    Start, round a far point, and back in to the Beer Near, so no leg has to cross an earlier one. None sits near Start, the
     Beer Near or the stretch between them: those streets are left for the
     first and last legs and the way back. Each stretch is an A* search that keeps clear of trail already laid and, given
     ``timing``, shies away from streets the pack could see the hare on.
@@ -506,8 +508,8 @@ def loop_route(net: Network, geo: Geometry, start, end, target_m: float, rng: ra
     n_wp = rng.choice(waypoints)
     walkable = getattr(net, "_ok", None) is not None
     for k in range(SHAPE_DRAWS if walkable else 1):
-        # Away from the Beer Near first; if the far end is in a river or past a freeway, swing wider.
-        shape = loop_shape(rng, (sx, sy), (ex, ey), radius_m, n_wp, spread_deg=70.0 + 20.0 * k)
+        # Any direction; if the far end is in a river or past a freeway, draw another.
+        shape = loop_shape(rng, (sx, sy), (ex, ey), radius_m, n_wp)
         fx, fy = shape.far_point()
         c = net.nearest(fx, fy, geo, walkable=True) if walkable else None
         if c is None or not walkable:
