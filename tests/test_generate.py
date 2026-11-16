@@ -151,7 +151,7 @@ def test_trail_may_use_the_way_back_near_the_beer_near(grid):
     assert corner not in reserved_corners(geo, back, start, end, 101.0)
 
 
-def test_loop_shapes_go_out_away_from_the_beer_near_and_vary():
+def test_loop_shapes_point_every_way_and_vary():
     import math
     import random
 
@@ -159,19 +159,23 @@ def test_loop_shapes_go_out_away_from_the_beer_near_and_vary():
 
     rng = random.Random(5)
     start, beer = (0.0, 0.0), (800.0, 0.0)  # Beer Near due east of Start
-    ratios = []
-    for _ in range(200):
+    ratios, quarters = [], [0, 0, 0, 0]
+    for _ in range(400):
         sh = loop_shape(rng, start, beer, 1500.0, 5)
-        fx, fy = sh.far_point()
-        assert fx < 400.0  # the far point lies west of the anchor: away from the Beer Near
+        quarters[int(((sh.heading + math.pi / 4) % (2 * math.pi)) // (math.pi / 2))] += 1
+        # Root on the Start-Beer Near line: midway, or at the Beer Near when heading back past it.
+        assert sh.ay == 0.0 and 400.0 - 1e-6 <= sh.ax <= 800.0 + 1e-6
+        if math.cos(sh.heading) > 0.9:
+            assert sh.ax > 700.0  # heading east, back past the Beer Near: rooted at it
         ratios.append(sh.width_m / sh.length_m)
         # Waypoints go round in order: out on Start's side, back on the Beer Near's.
         pts = [sh.point(i, rng) for i in range(sh.n)]
         ux, uy = math.cos(sh.heading), math.sin(sh.heading)
         across = [(-uy * (x - sh.ax) + ux * (y - sh.ay)) * sh.side for x, y, _ in pts]
         assert across[0] > 0 > across[-1] or sh.bend != 0  # (a bent loop can bow both ends one way)
-    # Not all one shape: narrow out-and-backs through fat beans.
+    # Not all one shape: narrow out-and-backs through fat beans; and every direction.
     assert min(ratios) < 0.25 and max(ratios) > 0.7
+    assert min(quarters) > 60
 
 
 def test_seg_dist():
