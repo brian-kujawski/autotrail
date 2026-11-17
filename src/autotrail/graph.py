@@ -167,11 +167,17 @@ def transform(tf: pyproj.Transformer, geom):
     return shapely.transform(geom, fn)
 
 
-def local_transformer(G: nx.MultiDiGraph) -> tuple[pyproj.Transformer, pyproj.Transformer]:
-    """Forward/inverse transformers to a metric projection centred on the graph."""
+def graph_centre(G: nx.MultiDiGraph) -> tuple[float, float]:
+    """(lon, lat) the local metric projection is centred on: the mean of the nodes."""
     xs = [d["x"] for _, d in G.nodes(data=True)]
     ys = [d["y"] for _, d in G.nodes(data=True)]
-    lon0, lat0 = float(np.mean(xs)), float(np.mean(ys))
+    return float(np.mean(xs)), float(np.mean(ys))
+
+
+def local_transformer(G: nx.MultiDiGraph, origin: tuple[float, float] | None = None
+                      ) -> tuple[pyproj.Transformer, pyproj.Transformer]:
+    """Forward/inverse transformers to a metric projection centred on ``origin`` (default: the graph)."""
+    lon0, lat0 = origin or graph_centre(G)
     local = pyproj.CRS.from_proj4(f"+proj=aeqd +lat_0={lat0} +lon_0={lon0} +units=m +ellps=WGS84")
     fwd = pyproj.Transformer.from_crs("EPSG:4326", local, always_xy=True)
     inv = pyproj.Transformer.from_crs(local, "EPSG:4326", always_xy=True)
@@ -353,16 +359,30 @@ def without_virtual(G: nx.MultiDiGraph) -> nx.MultiDiGraph:
 class StreetGraph:
     """Thin wrapper around the OSMnx graph with lookups the rest of Autotrail needs."""
 
-    def __init__(self, G: nx.MultiDiGraph, area_key: str | None = None):
+    def __init__(self, G: nx.MultiDiGraph, area_key: str | None = None,
+                 origin: tuple[float, float] | None = None):
         self.G = G
         self.area_key = area_key or G.graph.get("autotrail_area")
-        self._fwd, self._inv = local_transformer(G)
+        self.origin = origin or graph_centre(G)
+        self._fwd, self._inv = local_transformer(G, self.origin)
         self._node_ids: np.ndarray | None = None
         self._node_xy: np.ndarray | None = None
         self._edge_tree: STRtree | None = None
         self._edge_keys: list[tuple] = []
         self._split_into: dict[tuple, list[tuple]] = {}  # edges split after the index was built
         self._index_lock = threading.Lock()
+
+    def part(self, nodes) -> "StreetGraph":
+        """A copy of just these nodes and the streets between them, in the same local metres
+        (for worker processes: far smaller to send than the whole city)."""
+        return StreetGraph(self.G.subgraph(nodes).copy(), self.area_key, origin=self.origin)
+
+    def __getstate__(self):
+        # The projection, the street index and the lock are rebuilt on the other side.
+        return {"G": self.G, "area_key": self.area_key, "origin": self.origin}
+
+    def __setstate__(self, state):
+        self.__init__(state["G"], state["area_key"], origin=state["origin"])
 
     # -- basics
     def has_edge(self, u, v, k=0) -> bool:

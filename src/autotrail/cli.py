@@ -153,6 +153,7 @@ def generate(
     seed: int = typer.Option(0, "--seed", help="Different seeds give different trails."),
     tries: int = typer.Option(300, "--tries", help="Route attempts."),
     runs: int = typer.Option(20, "--runs", help="Simulated runs for the final report."),
+    workers: int = typer.Option(0, "--workers", help="CPU processes to search with (0 = one per CPU, 1 = none extra). Same seed, same trail, either way."),
     runners: int = RunnersOpt, fastest: str = FastOpt, slowest: str = SlowOpt,
     hare_pace: str = HarePaceOpt, head_start: float = HeadStartOpt,
     area: Optional[str] = AreaOpt,
@@ -168,7 +169,8 @@ def generate(
     g = load_area_graph(get_area(area, areas_file))
     settings = RunSettings(miles=miles, return_leg=return_miles > 0, return_miles=max(return_miles, 0.0),
                            seed=seed, tries=tries, runs=runs, runners=runners, fastest=fastest,
-                           slowest=slowest, hare_pace=hare_pace, head_start_min=head_start)
+                           slowest=slowest, hare_pace=hare_pace, head_start_min=head_start,
+                           workers=workers)
     try:
         res = run(g, _latlon(start), _latlon(end) if end else None, settings, out=out, map_out=map_out,
                   gpx=gpx, tiles=tiles, progress=typer.echo)

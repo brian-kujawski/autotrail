@@ -45,6 +45,7 @@ class RunSettings:
     slowest: str = "9:30"
     hare_pace: str = "10:15"
     head_start_min: float = 15.0
+    workers: int = 0               # CPU processes for the search (0 = one per CPU, 1 = no extra processes)
 
     def pack(self):
         return make_runners(self.runners, min_per_mile(self.fastest), min_per_mile(self.slowest))
@@ -145,7 +146,8 @@ def run(g: StreetGraph, start: LonLat, end: Optional[LonLat], s: RunSettings, *,
         back_mi = max(walk_back, 0.25)
 
     pack, hare = s.pack(), s.hare()
-    opts = GenerateOptions(miles=s.miles, return_miles=back_mi, tries=s.tries, exact_ends=True)
+    opts = GenerateOptions(miles=s.miles, return_miles=back_mi, tries=s.tries, exact_ends=True,
+                           workers=s.workers)
     res = generate(g, s_node, e_node, opts, pack=pack, hare=hare, seed=s.seed, progress=say, on_route=on_route)
     trail = res.trail
     if not s.return_leg:

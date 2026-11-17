@@ -115,9 +115,11 @@ def test_waypoints_stay_on_the_walkable_side_of_a_river():
     g, n, river = _river_city()
     start, end = (river + 2) * n + 10, (river + 4) * n + 13
     seen = []
-    gen = generate(g, start, end, GenerateOptions(miles=2.5, tries=30, runs=2, placements=1, candidates=1,
-                                                  return_miles=0.4), seed=0, on_route=seen.append)
-    assert gen.trail.true_path
+    # A few seeds: 30 attempts each is few enough that one seed can be unlucky.
+    for seed in range(4):
+        gen = generate(g, start, end, GenerateOptions(miles=2.5, tries=30, runs=2, placements=1, candidates=1,
+                                                      return_miles=0.4), seed=seed, on_route=seen.append)
+        assert gen.trail.true_path
     # Nothing picked across the water unless it's a fair walk over the bridge: every waypoint's walk
     # from Start is within the detour limit, and most attempts stay north of the river.
     from autotrail.generate import WALK_DETOUR, WALK_SLACK_M, Network
@@ -200,5 +202,22 @@ def test_loop_shrinks_when_waypoints_are_too_far_apart_on_foot(city, monkeypatch
     monkeypatch.setattr(gen, "loop_route", fake_loop_route)
     with pytest.raises(RuntimeError):
         gen.generate(city, 8 * 16 + 8, 8 * 16 + 11, GenerateOptions(miles=2.0, tries=8, runs=1))
-    assert all(b < a for a, b in zip(radii, radii[1:]))
+    # Attempts run in batches tried at one size: the size shrinks after every batch.
+    sizes = [r for i, r in enumerate(radii) if i == 0 or r != radii[i - 1]]
+    assert len(sizes) >= 4
+    assert all(b < a for a, b in zip(sizes, sizes[1:]))
     assert radii[-1] < 0.6 * radii[0]
+
+
+def test_same_trail_with_worker_processes(city):
+    """Route attempts and sim runs spread over processes give exactly the trail one process does."""
+    import json
+
+    from autotrail.generate import GenerateOptions, generate
+
+    def go(workers):
+        o = GenerateOptions(miles=2.0, tries=24, runs=2, placements=2, candidates=2, workers=workers)
+        gen = generate(city, 8 * 16 + 8, 8 * 16 + 11, o, seed=3)
+        return json.dumps(gen.trail.to_geojson(city), sort_keys=True), gen.card.total, len(gen.results)
+
+    assert go(1) == go(2)

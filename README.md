@@ -59,9 +59,11 @@ autotrail generate --start "42.3315,-83.0700" --end "42.3350,-83.0600" --miles 4
 Start (and the Beer Near, if you give one) go on the nearest point of the nearest street or path. With `--end`
 the leg back to Start is sized from the real walk between the two (`--return-miles 0` still
 turns it off). Without `--end` a Beer Near is picked about `--return-miles` (default 1) from
-Start, and a hared leg back is added. It tries about 60 loop-shaped routes that keep clear of themselves, puts marks on the
-best few several ways, simulates the pack and the hare on each and keeps the best. Takes about
-a minute on the Detroit map. `--seed` gives a different trail. It writes the trail GeoJSON plus
+Start, and a hared leg back is added. It tries `--tries` (default 300) loop-shaped routes that keep clear of themselves, puts marks on the
+best few several ways, simulates the pack and the hare on each and keeps the best. The route
+attempts and the sim runs are spread over every CPU core (`--workers N` to choose how many;
+`--workers 1` keeps it all in one process). A seed gives the same trail whatever the number of
+workers. `--seed` gives a different trail. It writes the trail GeoJSON plus
 an HTML map with the pack replay (press Play), and prints the score.
 
 `--hare-pace 10:15` (min/mile while marking) and `--head-start 15` (minutes) set the hare.
