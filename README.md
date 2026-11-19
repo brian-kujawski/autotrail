@@ -99,6 +99,11 @@ cached before this change prints a warning: run `autotrail download --force` to 
 The cached graph lives in `data/cache/<area>.graphml` (set `AUTOTRAIL_DATA` to move it).
 Use `autotrail download --force` to refresh it.
 
+Freeways (OSM `motorway`; not `trunk`, which in Detroit also tags Woodward, Gratiot and the
+like) aren't in the walking network, so their lines are fetched separately the first time a
+map loads and cached in `data/cache/<area>-freeways.geojson` (`autotrail download --force`
+refreshes both). Without them, routes simply aren't steered off service drives.
+
 ### Drawing a trail by hand
 
 Draw on [geojson.io](https://geojson.io) (or QGIS) and save the GeoJSON:
@@ -165,6 +170,11 @@ Both the generator and the simulated hounds follow these (`autotrail.rules`):
   ways would look at the hare usually gets an arrow instead of a check (sometimes with a check
   one corner on). Hounds seeing *other hounds* on another part of trail is fine: it pulls the
   pack together.
+* **Cross freeways, don't hang about beside them.** Within 100 m of a freeway's centreline
+  (service drives, their sidewalks, the streets right beside them) each metre costs extra in the
+  route search, sliding with the angle to the freeway: 2x crossing at right angles, 4x running
+  alongside (`freeway_cross_cost`, `freeway_along_cost`; set both to 1 to turn it off). Nothing
+  is banned: bridges and parks near freeways stay usable, just not for lingering.
 
 ## How the simulated pack behaves
 

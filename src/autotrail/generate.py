@@ -101,6 +101,10 @@ class GenerateOptions:
     target_turns_per_mile: float = 12.0     # shortlist: routes this twisty (or more) count as fully twisty
     sight_cost: float = 3.0           # each metre the pack could see the hare run costs this many extra
     risky_check_share: float = 0.2    # chance a turn gets a check when checkers would look at the hare
+    # Freeway cordon (graph.FREEWAY_CORDON_M either side of a freeway): each metre there costs
+    # this many metres, sliding with the angle from crossing at right angles to running alongside.
+    freeway_cross_cost: float = 2.0
+    freeway_along_cost: float = 4.0
     workers: int = 1                  # processes for route attempts and sim runs (0 = one per CPU)
 
 
@@ -121,7 +125,8 @@ KEEP_OUT_SHARE = 0.25      # no waypoint within this share of the loop radius of
 class Network:
     """Adjacency lists for the part of the graph within reach of Start."""
 
-    def __init__(self, g: StreetGraph, centre, radius_m: float, streets_only: bool = False):
+    def __init__(self, g: StreetGraph, centre, radius_m: float, streets_only: bool = False,
+                 freeway_cost: tuple[float, float] = (1.0, 1.0)):
         self.g = g
         G = g.G
         reach = self._reach(G, centre, radius_m)
@@ -141,6 +146,12 @@ class Network:
                 # Sidewalks are kept (where OSM maps them separately, the street itself is
                 # often left out of the walking network) but a centreline is preferred.
                 cost = length * (1.3 if _hw(d) == "service" else 1.5 if is_sidewalk(d) else 1.0)
+                # Near a freeway: crossing is fine, hanging about on the service drive isn't.
+                share = float(d.get("freeway_share", 0.0) or 0.0)
+                if share:
+                    cross, along = freeway_cost
+                    par = float(d.get("freeway_parallel", 0.0) or 0.0)
+                    cost *= 1.0 + share * (cross + (along - cross) * par - 1.0)
                 self.adj[u].append((v, k, length, cost))
                 self.radj[v].append((u, k, length, cost))
         self.nodes = {n for n in reach if self.adj[n]}
@@ -1024,7 +1035,7 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
     timing = PackTiming.of(hare, pack)
 
     net_radius = target * 0.45 + back
-    net = Network(g, start, net_radius)
+    net = Network(g, start, net_radius, freeway_cost=(o.freeway_cross_cost, o.freeway_along_cost))
     say(f"Searching {len(net.nodes):,} intersections within {net_radius / METRES_PER_MILE:.1f} mi of Start")
     # Start and Beer Near go on real corners (3+ ways), not dead-end stubs or mid-block points:
     # trail leaves Start one way and comes back in another.

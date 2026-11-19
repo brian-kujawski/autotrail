@@ -113,3 +113,10 @@ def city():
     G = build_city()
     annotate(G)
     return StreetGraph(G, area_key="city")
+
+
+@pytest.fixture(autouse=True)
+def _no_freeway_download(monkeypatch):
+    """Tests never reach OSM: no freeways unless a test supplies them."""
+    from autotrail import graph as graph_mod
+    monkeypatch.setattr(graph_mod, "download_freeways", lambda area: [])
