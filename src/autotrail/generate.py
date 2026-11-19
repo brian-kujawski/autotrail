@@ -30,6 +30,7 @@ marks is phase 2.
 from __future__ import annotations
 
 import bisect
+import copy
 import heapq
 import math
 import random
@@ -42,6 +43,7 @@ import numpy as np
 from .facts import corner_facts
 from .graph import StreetGraph
 from .pack import HareProfile, HoundProfile, default_pack
+from .parallel import Workers, auto_workers
 from .rules import (
     CORRIDOR_M,
     COVER_M,
@@ -99,6 +101,7 @@ class GenerateOptions:
     target_turns_per_mile: float = 12.0     # shortlist: routes this twisty (or more) count as fully twisty
     sight_cost: float = 3.0           # each metre the pack could see the hare run costs this many extra
     risky_check_share: float = 0.2    # chance a turn gets a check when checkers would look at the hare
+    workers: int = 1                  # processes for route attempts and sim runs (0 = one per CPU)
 
 
 RUN_STEP_M = 25.0  # route search tracks the straight run so far in steps of this
@@ -200,6 +203,11 @@ class Network:
             return math.hypot(x - bx, y - by)
 
         factor: dict = {}
+        # Whether a street clashes with trail already laid depends on where along trail it's run
+        # only while the stretch just run is short enough to be exempt (see Footprint.clashes):
+        # past that, it's the same answer every time the search reaches that street.
+        clash_memo: dict = {}
+        recent = fp.recent_default
         # The straight-run penalty depends on how long the run so far is, so it's part of the
         # search state (in RUN_STEP_M buckets, capped where the penalty starts: past that, every
         # metre costs the same). Otherwise a cheaper path with a long straight blocks the twisty one.
@@ -270,7 +278,13 @@ class Network:
                 nst = (v, u, bucket(rn), sb > 0)
                 if nd >= cost.get(nst, math.inf):
                     continue
-                if fp.clashes((u, v, k), tag, pos0 + ru):
+                if ru > recent:
+                    cl = clash_memo.get((u, v, k))
+                    if cl is None:
+                        cl = clash_memo[(u, v, k)] = fp.clashes((u, v, k), tag, pos0 + ru)
+                else:
+                    cl = fp.clashes((u, v, k), tag, pos0 + ru)
+                if cl:
                     continue
                 if sight is not None and sight_cost:
                     nd += sight_cost * sight.exposed_m((u, v, k), pos0 + ru)
@@ -1009,9 +1023,9 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
     back = o.return_miles * METRES_PER_MILE
     timing = PackTiming.of(hare, pack)
 
-    radius = target * 0.45 + back
-    net = Network(g, start, radius)
-    say(f"Searching {len(net.nodes):,} intersections within {radius / METRES_PER_MILE:.1f} mi of Start")
+    net_radius = target * 0.45 + back
+    net = Network(g, start, net_radius)
+    say(f"Searching {len(net.nodes):,} intersections within {net_radius / METRES_PER_MILE:.1f} mi of Start")
     # Start and Beer Near go on real corners (3+ ways), not dead-end stubs or mid-block points:
     # trail leaves Start one way and comes back in another.
     # A hand-picked point mid-block (two ways) is fine: trail leaves one way, comes back the other.
@@ -1031,49 +1045,132 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
             ring = [n for n, d in from_start.items() if d >= 0.5 * back] or [max(from_start, key=from_start.get)]
         ends = rng.sample(ring, min(6, len(ring)))
 
+    net.set_walks(start, geo)
+    n_workers = o.workers or auto_workers()
+
+    def remote() -> dict:
+        # Workers get the map within reach of Start plus a margin (side legs, probes and sight
+        # lines run a few hundred metres off the trail), in the same local metres.
+        part = g.part(Network._reach(g.G, start, net_radius + PART_MARGIN_M).keys())
+        net_r = copy.copy(net)
+        net_r.g = part
+        return dict(st, g=part, net=net_r, geo=None, local=False)
+
+    st = dict(g=g, net=net, geo=geo, opts=o, start=start, target=target, back=back,
+              timing=timing, pack=pack, hare=hare, seed=seed, local=True)
+    with Workers(n_workers, st, remote, setup=_worker_setup) as pool:
+        if n_workers > 1:
+            say(f"Using {n_workers} worker processes")
+        best = _search(pool, st, ends, rng, say, on_route)
+    return best
+
+
+# Route attempts run in batches (the same whatever the number of workers, so a seed gives the
+# same trail on any PC), and the loop size is steered after each batch. The first batches are
+# small, so the first guess at the size gets corrected quickly; after that, ROUTE_BATCH at a time.
+ROUTE_BATCH = 12
+FIRST_BATCHES = (1, 1, 2, 2, 4, 4, 8, 8)
+PART_MARGIN_M = 1000.0  # workers get the map this far past the search area
+
+
+def _worker_setup(st: dict) -> None:
+    st["geo"] = Geometry(st["g"])
+
+
+def route_footprint(geo: Geometry, keep_apart_m: float, edges, reserved, start, end) -> Footprint:
+    """The footprint :func:`loop_route` leaves behind for a route, rebuilt from the route itself."""
+    fp = Footprint(geo, keep_apart_m)
+    if reserved:
+        fp.add_path(reserved, "return")
+        fp.zones += [(*geo.node_xy(start), END_ZONE_M), (*geo.node_xy(end), END_ZONE_M)]
+    fp.add_path(edges, "true")
+    return fp
+
+
+def _way_back(st: dict, e, rng: random.Random):
+    """The leg Beer Near -> Start, planned before the trail so there's always a clear way back."""
+    net, geo, o, start = st["net"], st["geo"], st["opts"], st["start"]
+    if e == start:
+        return []
+    fpr = Footprint(geo, o.keep_apart_m)
+    kw = dict(max_len=st["back"] * 2.0, rng=rng, noise=0.25)
+    # Shorter and simpler than the trail: only the long straights get nudged.
+    ret = net.clear_path(e, start, fpr, "return", 0.0, set(), **kw,
+                         straight_run_m=max(o.straight_run_m, RETURN_STRAIGHT_M), straight_cost=o.straight_cost)
+    return ret if ret is not None else net.clear_path(e, start, fpr, "return", 0.0, set(), **kw)
+
+
+def _route_attempt(st: dict, job) -> dict:
+    """One route attempt (a worker job): the way back, then a loop out to the Beer Near."""
+    seed, e, radius = job
+    o = st["opts"]
+    rng = random.Random(seed)
+    t0 = time.time()
+    ret = _way_back(st, e, rng)
+    trace: dict = {"waypoints": [], "edges": [], "reason": None}
+    stats: dict = {}
+    got = None
+    if ret is None:
+        trace["reason"] = "no clear way back from the Beer Near to Start"
+    else:
+        got = loop_route(st["net"], st["geo"], st["start"], e, st["target"], rng, radius, o.keep_apart_m,
+                         turn_cost_m=o.turn_cost_m, timing=st["timing"], sight_cost=o.sight_cost,
+                         straight_run_m=o.straight_run_m, straight_cost=o.straight_cost, stats=stats,
+                         waypoints=o.waypoints, reserved=ret, trace=trace)
+    shape = trace.pop("shape", None)
+    trace["outline"] = shape.outline() if shape else []
+    return {"ret": ret, "route": got[0] if got else None, "trace": trace, "stats": stats,
+            "seconds": time.time() - t0}
+
+
+def _place_and_score(st: dict, job) -> dict:
+    """Lay one mark layout on a route and score it on a few sim runs (a worker job)."""
+    r, e, ret, lo, place_seed, sim_seed = job
+    g, geo, o, start = st["g"], st["geo"], st["opts"], st["start"]
+    base = Trail(start=start, end=e, true_path=[EdgeRef(*x) for x in r],
+                 return_path=[EdgeRef(*x) for x in ret],
+                 meta={"source": "generated", "seed": st["seed"], "target_miles": o.miles,
+                       "generated": date.today().isoformat()})
+    fp = route_footprint(geo, o.keep_apart_m, r, ret, start, e)
+    t = place_marks(base, g, random.Random(place_seed), lo, fp, st["timing"])
+    results = simulate_many(t, g, st["pack"], runs=o.runs, seed=sim_seed, model=TrailModel(t, g))
+    card = score_results(results, st["target"], hare=st["hare"])
+    # Sim results hold the compiled trail and its graph: only worth keeping in this process.
+    return {"trail": t, "card": card, "results": results if st["local"] else None}
+
+
+def _search(pool: Workers, st: dict, ends: list, rng: random.Random, say, on_route) -> Generated:
+    g, geo, o, start, target = st["g"], st["geo"], st["opts"], st["start"], st["target"]
+    timing = st["timing"]
     routes = []
     stats: dict = {}
-    net.set_walks(start, geo)
-
-    def way_back(e):
-        """The leg Beer Near -> Start, planned before the trail so there's always a clear way back."""
-        if e == start:
-            return []
-        fpr = Footprint(geo, o.keep_apart_m)
-        kw = dict(max_len=back * 2.0, rng=rng, noise=0.25)
-        # Shorter and simpler than the trail: only the long straights get nudged.
-        ret = net.clear_path(e, start, fpr, "return", 0.0, set(), **kw,
-                             straight_run_m=max(o.straight_run_m, RETURN_STRAIGHT_M), straight_cost=o.straight_cost)
-        return ret if ret is not None else net.clear_path(e, start, fpr, "return", 0.0, set(), **kw)
-
     # Loop size: a first guess (the route weaves in and out, so it's longer than the rim);
-    # every attempt steers it toward the target (see below).
+    # every batch of attempts steers it toward the target (see below).
     radius = target / 5.5
     twist_ratio: list[float] = []  # route length / shortest walk through its waypoints, per route found
     per_end = max(1, o.tries // len(ends))
-    n_try, total = 0, per_end * len(ends)
+    queue = [e for e in ends for _ in range(per_end)]
+    n_try, total = 0, len(queue)
     no_way_back = 0
-    for e in ends:
-        for _ in range(per_end):
+    b0, nb = 0, 0
+    while b0 < total:
+        size = FIRST_BATCHES[nb] if nb < len(FIRST_BATCHES) else ROUTE_BATCH
+        batch = [(rng.randrange(2**32), e, radius) for e in queue[b0:b0 + size]]
+        b0, nb = b0 + size, nb + 1
+        steer: list[float] = []
+        for (_, e, _), out in zip(batch, pool.map(_route_attempt, batch)):
             n_try += 1
-            t0 = time.time()
-            ret = way_back(e)
-            trace: dict = {"waypoints": [], "edges": [], "reason": None}
-            got = None
+            ret, r, trace = out["ret"], out["route"], out["trace"]
+            for k, v in out["stats"].items():
+                stats[k] = stats.get(k, 0) + v
             if ret is None:
                 no_way_back += 1
-                trace["reason"] = "no clear way back from the Beer Near to Start"
-            else:
-                got = loop_route(net, geo, start, e, target, rng, radius, o.keep_apart_m,
-                                 turn_cost_m=o.turn_cost_m, timing=timing, sight_cost=o.sight_cost,
-                                 straight_run_m=o.straight_run_m, straight_cost=o.straight_cost, stats=stats,
-                                 waypoints=o.waypoints, reserved=ret, trace=trace)
             # Steer the loop size toward the target on every attempt, not just the ones that work:
             # real streets (rivers, freeways, rail yards, sidewalk networks) make the walk round a
             # loop much longer than its outline, and that differs from city to city.
             est = None
-            if got:
-                est = path_len(g, got[0])
+            if r:
+                est = path_len(g, r)
                 if math.isfinite(trace.get("least_m", math.inf)) and trace["least_m"] > 0:
                     twist_ratio.append(est / trace["least_m"])
             elif trace.get("too_long_m"):
@@ -1084,13 +1181,11 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
                 ratio = sorted(twist_ratio)[len(twist_ratio) // 2] if twist_ratio else 1.15
                 est = trace["least_m"] * ratio if math.isfinite(trace["least_m"]) else 1.6 * target
             if est:
-                radius *= min(1.5, max(0.6, (target / est) ** 0.5))
+                steer.append(min(math.log(2.25), max(math.log(0.36), math.log(target / est))))
             info = {"n": n_try, "of": total, "start": start, "end": e, "return": ret or [],
                     "waypoints": trace["waypoints"], "edges": trace["edges"], "ok": False,
-                    "outline": trace["shape"].outline() if trace.get("shape") else [],
-                    "reason": trace["reason"], "seconds": time.time() - t0}
-            if got:
-                r, fp = got
+                    "outline": trace["outline"], "reason": trace["reason"], "seconds": out["seconds"]}
+            if r:
                 length = path_len(g, r)
                 fit = DistanceFit(target).score(length, []).value
                 tpm = turns_per_mile(geo, r, _cum(g, r))
@@ -1104,9 +1199,15 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
                     twist = min(1.0, tpm / o.target_turns_per_mile)
                     sc = fit * (0.5 + 0.5 * twist)
                     info.update(ok=True, score=sc)
-                    routes.append((sc + rng.random() * 1e-3, r, e, ret, fp))
+                    routes.append((sc + rng.random() * 1e-3, r, e, ret))
             if on_route is not None:
                 on_route(info)
+        if steer:
+            # The batch was all tried at one size, so their average says more than any one of them:
+            # one attempt moves the size halfway (in log terms) to what it suggests, a batch of 12
+            # nearly all the way.
+            gain = 0.5 + 0.5 * (1.0 - 1.0 / len(steer))
+            radius *= min(1.5, max(0.6, math.exp(gain * sum(steer) / len(steer))))
     if not routes:
         if no_way_back == n_try:
             raise RuntimeError("No clear way back from the Beer Near to Start (within twice the walk); "
@@ -1116,12 +1217,12 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
     routes.sort(key=lambda t: -t[0])
 
     picked, seen = [], []
-    for sc, r, e, ret, fp in routes:
+    for sc, r, e, ret in routes:
         sig = frozenset(_und(x) for x in r)
         if any(len(sig & s) > 0.6 * len(sig) for s in seen):
             continue
         seen.append(sig)
-        picked.append((sc, r, e, ret, fp))
+        picked.append((sc, r, e, ret))
         if len(picked) >= o.candidates:
             break
     say(f"Tried {len(routes)} routes; simulating marks on the best {len(picked)}")
@@ -1129,21 +1230,21 @@ def generate(g: StreetGraph, start, end=None, opts: GenerateOptions | None = Non
         say(f"Note: {stats['unnudged']} stretch(es) found no route with the long-straight and hare-sight "
             "nudges and were routed without them")
 
-    best: Generated | None = None
-    tried = []
-    for sc, r, e, ret, fp in picked:
-        base = Trail(start=start, end=e, true_path=[EdgeRef(*x) for x in r],
-                     return_path=[EdgeRef(*x) for x in ret],
-                     meta={"source": "generated", "seed": seed, "target_miles": o.miles,
-                           "generated": date.today().isoformat()})
+    jobs, scores = [], []
+    for sc, r, e, ret in picked:
         for p in range(o.placements):
             lo = o if p == 0 else vary_layout(o, rng)
-            t = place_marks(base, g, random.Random(rng.random()), lo, fp, timing)
-            model = TrailModel(t, g)
-            results = simulate_many(t, g, pack, runs=o.runs, seed=rng.randrange(10**6), model=model)
-            card = score_results(results, target, hare=hare)
-            tried.append((sc, card.total))
-            if best is None or card.total > best.card.total:
-                best = Generated(t, card, results)
-    best.tried = tried
-    return best
+            jobs.append((r, e, ret, lo, rng.random(), rng.randrange(10**6)))
+            scores.append(sc)
+    best, best_job, tried = None, None, []
+    for sc, job, out in zip(scores, jobs, pool.map(_place_and_score, jobs)):
+        tried.append((sc, out["card"].total))
+        if best is None or out["card"].total > best["card"].total:
+            best, best_job = out, job
+    results = best["results"]
+    if results is None:  # scored in a worker: rerun the same seeded runs here, on the whole map
+        t = best["trail"]
+        results = simulate_many(t, g, st["pack"], runs=o.runs, seed=best_job[5], model=TrailModel(t, g))
+    gen = Generated(best["trail"], best["card"], results)
+    gen.tried = tried
+    return gen
