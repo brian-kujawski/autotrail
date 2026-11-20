@@ -8,11 +8,15 @@ Edge attributes Autotrail relies on:
     highway, surface, lit, access   OSM tags (may be lists after simplification)
     landmark_value     0.0 for now; filled in by later phases
     virtual            True for edges Autotrail added to stitch an OSM gap
+    freeway_share      share of the edge within ``FREEWAY_CORDON_M`` of a freeway (0..1);
+                       worked out on every load from the cached freeway lines, never saved
 Node attributes: x (lon), y (lat), degree (distinct neighbours).
 """
 
 from __future__ import annotations
 
+import json
+import math
 import logging
 import threading
 from dataclasses import dataclass
@@ -63,7 +67,13 @@ HASH_WALK_FILTER = (
     '["foot"!~"no"]["service"!~"private"]'
     '["sidewalk"!~"separate"]["sidewalk:both"!~"separate"]["sidewalk:left"!~"separate"]["sidewalk:right"!~"separate"]'
 )
-GRAPH_FORMAT = 3  # 2: cycleways included; 3: every street two-way
+GRAPH_FORMAT = 3
+
+# Freeways aren't in the walk network (the filter above drops every motorway way), so their
+# lines are downloaded on their own. Only motorways count: in Detroit, trunk also tags big
+# avenues (Woodward, Gratiot, Michigan Ave) that are fine to run along.
+FREEWAY_TAGS = {"highway": "motorway"}
+FREEWAY_CORDON_M = 100.0  # an edge this close to a freeway's centreline is in the cordon  # 2: cycleways included; 3: every street two-way
 
 
 def download_graph(area: Area) -> nx.MultiDiGraph:
@@ -103,7 +113,7 @@ def load_area_graph(
         if fixed:
             log.warning("The cached map had %d one-way street(s); made them two-way in memory. "
                         "'autotrail download --force' fixes the file.", fixed)
-        return StreetGraph(G, area_key=area.key)
+        return _with_freeways(StreetGraph(G, area_key=area.key), area, root)
 
     configure_osmnx(root)
     G = download_graph(area)
@@ -116,7 +126,56 @@ def load_area_graph(
     G.graph["autotrail_stitch_tolerance_m"] = area.stitch_tolerance_m if stitch else 0.0
     path.parent.mkdir(parents=True, exist_ok=True)
     ox.save_graphml(G, path)
-    return StreetGraph(G, area_key=area.key)
+    return _with_freeways(StreetGraph(G, area_key=area.key), area, root, force=force)
+
+
+# ---------------------------------------------------------------- freeways
+
+def freeways_path(area: Area, root: Path | None = None) -> Path:
+    return (root or data_dir()) / "cache" / f"{area.slug}-freeways.geojson"
+
+
+def download_freeways(area: Area) -> list[LineString]:
+    """Freeway centrelines (lon/lat) for the area's places."""
+    log.info("Downloading freeways for %s", ", ".join(area.places))
+    gdf = ox.features_from_place(list(area.places), tags=FREEWAY_TAGS)
+    lines: list[LineString] = []
+    for geom in gdf.geometry:
+        if geom is None:
+            continue
+        if geom.geom_type == "LineString":
+            lines.append(geom)
+        elif geom.geom_type == "MultiLineString":
+            lines.extend(geom.geoms)
+    return lines
+
+
+def load_freeways(area: Area, root: Path | None = None, force: bool = False) -> list[LineString]:
+    """Cached freeway lines, downloading them on a miss. Empty (with a warning) if that fails."""
+    path = freeways_path(area, root)
+    if path.exists() and not force:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [LineString(f["geometry"]["coordinates"]) for f in data.get("features", [])]
+    try:
+        configure_osmnx(root or data_dir())
+        lines = download_freeways(area)
+    except Exception as exc:  # noqa: BLE001 - offline, or no freeways in the area
+        log.warning("Couldn't download freeways (%s); routes won't be steered off service drives. "
+                    "Run 'autotrail download' when online.", exc)
+        return []
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {}, "geometry": {"type": "LineString", "coordinates": list(map(list, ln.coords))}}
+        for ln in lines]}), encoding="utf-8")
+    log.info("Cached %d freeway lines at %s", len(lines), path)
+    return lines
+
+
+def _with_freeways(g: "StreetGraph", area: Area, root: Path | None, force: bool = False) -> "StreetGraph":
+    n = g.mark_freeway_cordon(load_freeways(area, root, force=force))
+    if n:
+        log.info("%d street edges run within %.0f m of a freeway", n, FREEWAY_CORDON_M)
+    return g
 
 
 def make_two_way(G: nx.MultiDiGraph) -> int:
@@ -512,6 +571,75 @@ class StreetGraph:
             self._split_into[(v, u, k2)] = [(v, new_id, _last_key(self.G, v, new_id)),
                                             (new_id, u, _last_key(self.G, new_id, u))]
         return new_id
+
+    def mark_freeway_cordon(self, freeways_lonlat, cordon_m: float = FREEWAY_CORDON_M) -> int:
+        """Set each edge's ``freeway_share`` and ``freeway_parallel``.
+
+        ``freeway_share``: the share of the edge within ``cordon_m`` of a freeway's centreline.
+        ``freeway_parallel``: over that part, how parallel it runs to the nearest freeway,
+        length-weighted, linear in angle: 0 = at right angles (a crossing), 1 = alongside
+        (a service drive). Done once per load, so the route search only multiplies.
+        Returns how many edges touch the cordon.
+        """
+        for _, _, d in self.G.edges(data=True):
+            d["freeway_share"] = 0.0
+            d["freeway_parallel"] = 0.0
+        if not freeways_lonlat:
+            return 0
+        fwd = self._fwd.transform
+        fw = [transform(fwd, ln) for ln in freeways_lonlat]
+        fw = [ln for ln in fw if ln.length > 0]
+        if not fw:
+            return 0
+        tree = STRtree(fw)
+        cordon = shapely.union_all([ln.buffer(cordon_m) for ln in fw])
+        shapely.prepare(cordon)
+        # Projecting every street of a city is slow, so first pick the streets that could reach
+        # the cordon: an end within twice the cordon (in lon/lat, with a margin), or longer than
+        # twice the cordon. Every point of a street is within half its length of an end, so a
+        # shorter street with both ends further out stays out of the cordon.
+        lat = math.radians(self.origin[1])
+        margin = 2.0 * cordon_m / (111_320.0 * max(math.cos(lat), 0.2))
+        rough = shapely.union_all([ln.buffer(margin) for ln in freeways_lonlat])
+        shapely.prepare(rough)
+        ids = list(self.G.nodes)
+        xs = np.array([float(self.G.nodes[i]["x"]) for i in ids])
+        ys = np.array([float(self.G.nodes[i]["y"]) for i in ids])
+        near_node = {i for i, hit in zip(ids, shapely.contains_xy(rough, xs, ys)) if hit}
+        n = 0
+        for u, v, k, d in self.G.edges(keys=True, data=True):
+            if u not in near_node and v not in near_node and float(d["length"]) <= 2.0 * cordon_m:
+                continue
+            line = self.edge_line_m(u, v, k)
+            if line.length <= 0 or not cordon.intersects(line):
+                continue
+            inside = line.intersection(cordon)
+            parts = getattr(inside, "geoms", [inside])
+            m_in = par = 0.0
+            for part in parts:
+                if part.geom_type != "LineString":
+                    continue
+                c = list(part.coords)
+                for (x0, y0), (x1, y1) in zip(c, c[1:]):
+                    seg = math.hypot(x1 - x0, y1 - y0)
+                    if seg <= 0:
+                        continue
+                    mid = Point((x0 + x1) / 2, (y0 + y1) / 2)
+                    f = fw[int(tree.nearest(mid))]
+                    at = f.project(mid)
+                    p0 = f.interpolate(max(0.0, at - 10.0))
+                    p1 = f.interpolate(min(f.length, at + 10.0))
+                    fa = math.atan2(p1.y - p0.y, p1.x - p0.x)
+                    ea = math.atan2(y1 - y0, x1 - x0)
+                    diff = abs((ea - fa + math.pi / 2) % math.pi - math.pi / 2)  # 0..pi/2
+                    m_in += seg
+                    par += seg * (1.0 - diff / (math.pi / 2))
+            if m_in > 0:
+                d = self.G.edges[u, v, k]
+                d["freeway_share"] = min(1.0, m_in / line.length)
+                d["freeway_parallel"] = par / m_in
+                n += 1
+        return n
 
     def point_on_edge(self, u, v, k, offset_m: float) -> tuple[float, float]:
         length = self.edge_length(u, v, k)
